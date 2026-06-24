@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Page Anchor</title>
+  <link rel="stylesheet" href="https://cdn.elgato.com/streamdeck/v1/sdpi.css" />
+</head>
+<body class="sdpi-wrapper">
+
+  <!-- Enable toggle -->
+  <div class="sdpi-item" id="row-enabled">
+    <div class="sdpi-item-label">Enabled</div>
+    <div class="sdpi-item-value">
+      <input
+        class="sdpi-item-value"
+        id="enabled"
+        type="checkbox"
+      />
+      <label for="enabled"></label>
+    </div>
+  </div>
+
+  <!-- Target device dropdown -->
+  <div class="sdpi-item" id="row-device">
+    <div class="sdpi-item-label">Sync device</div>
+    <select class="sdpi-item-value select" id="targetDeviceId">
+      <option value="">All other devices</option>
+    </select>
+  </div>
+
+  <!-- Target profile name -->
+  <div class="sdpi-item" id="row-profile">
+    <div class="sdpi-item-label">Profile name</div>
+    <input
+      class="sdpi-item-value"
+      type="text"
+      id="targetProfile"
+      placeholder="e.g. Deck Sync – Original Page 1"
+    />
+  </div>
+
+  <details class="sdpi-item">
+    <summary>About profile names</summary>
+    <p style="padding: 8px; font-size: 12px; color: var(--sdpi-color-secondary)">
+      Enter the exact name of a profile bundled with this plugin (case-sensitive).
+      Profiles are visible in Stream Deck → Preferences → Profiles.
+    </p>
+  </details>
+
+  <script>
+    const sdpiHandler = (() => {
+      let settings = {};
+      let websocket = null;
+      let uuid = null;
+
+      function onOpen() {
+        const regEvent = {
+          event: "registerPropertyInspector",
+          uuid,
+        };
+        websocket.send(JSON.stringify(regEvent));
+
+        // Ask the plugin for connected devices.
+        sendToPlugin({ event: "getDevices" });
+      }
+
+      function onMessage(e) {
+        const data = JSON.parse(e.data);
+
+        if (data.event === "didReceiveSettings") {
+          settings = data.payload.settings ?? {};
+          applySettings();
+        }
+
+        if (data.event === "sendToPropertyInspector") {
+          const payload = data.payload;
+          if (payload.event === "devicesUpdate") {
+            populateDevices(payload.devices);
+          }
+        }
+      }
+
+      function applySettings() {
+        document.getElementById("enabled").checked = settings.enabled ?? true;
+        document.getElementById("targetDeviceId").value = settings.targetDeviceId ?? "";
+        document.getElementById("targetProfile").value = settings.targetProfile ?? "";
+      }
+
+      function saveSettings() {
+        settings = {
+          enabled: document.getElementById("enabled").checked,
+          targetDeviceId: document.getElementById("targetDeviceId").value,
+          targetProfile: document.getElementById("targetProfile").value,
+        };
+
+        websocket.send(JSON.stringify({
+          event: "setSettings",
+          context: uuid,
+          payload: settings,
+        }));
+      }
+
+      function sendToPlugin(payload) {
+        websocket.send(JSON.stringify({
+          event: "sendToPlugin",
+          context: uuid,
+          payload,
+        }));
+      }
+
+      function populateDevices(devices) {
+        const select = document.getElementById("targetDeviceId");
+        const current = settings.targetDeviceId ?? "";
+
+        // Remove old device options (keep the "All other devices" default).
+        while (select.options.length > 1) select.remove(1);
+
+        for (const device of devices) {
+          const opt = document.createElement("option");
+          opt.value = device.id;
+          opt.textContent = device.name + (device.isConnected ? "" : " (disconnected)");
+          select.appendChild(opt);
+        }
+
+        select.value = current;
+      }
+
+      return {
+        connect(port, propertyInspectorUUID) {
+          uuid = propertyInspectorUUID;
+          websocket = new WebSocket(`ws://127.0.0.1:${port}`);
+          websocket.addEventListener("open", onOpen);
+          websocket.addEventListener("message", onMessage);
+
+          document.getElementById("enabled").addEventListener("change", saveSettings);
+          document.getElementById("targetDeviceId").addEventListener("change", saveSettings);
+          document.getElementById("targetProfile").addEventListener("input", saveSettings);
+        },
+      };
+    })();
+
+    // Stream Deck injects connectElgatoStreamDeckSocket into the page.
+    function connectElgatoStreamDeckSocket(port, uuid, _event, _info) {
+      sdpiHandler.connect(port, uuid);
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+node_modules/
+com.johnmschoonover.decksync.sdPlugin/bin/
+com.johnmschoonover.decksync.sdPlugin/logs/
+*.js.map

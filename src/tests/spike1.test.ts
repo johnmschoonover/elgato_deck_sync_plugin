@@ -4,6 +4,7 @@ jest.mock('@elgato/streamdeck', () => ({
   default: {
     actions: {
       registerAction: jest.fn(),
+      registeredActions: [],
     },
     connect: jest.fn(),
     profiles: {
@@ -15,6 +16,9 @@ jest.mock('@elgato/streamdeck', () => ({
     ],
     ui: {
       sendToPropertyInspector: jest.fn(),
+    },
+    settings: {
+      onDidReceiveGlobalSettings: jest.fn(),
     },
   },
   // Mock the action decorator properly to avoid TS7006

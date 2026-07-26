@@ -9,9 +9,13 @@
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\""
   },
   "devDependencies": {
+    "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",
+    "@types/jest": "^30.0.0",
+    "jest": "^30.4.2",
     "rollup": "^4.0.0",
+    "ts-jest": "^29.4.11",
     "tslib": "^2.6.0",
     "typescript": "^5.0.0"
   },

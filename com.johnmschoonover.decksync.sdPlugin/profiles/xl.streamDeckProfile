@@ -1,0 +1,364 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Pages": [
+    {
+      "KeyCount": 32,
+      "Keys": [
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 1",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 2",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 3",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 4",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 5",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 6",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 7",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 8",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 9",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 10",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 11",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 12",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 13",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 14",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 15",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 16",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 17",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 18",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 19",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 20",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 21",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 22",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 23",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 24",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 25",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 26",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 27",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 28",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 29",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 30",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 31",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 32",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "UUID": "deck-xl-uuid-000000000000000000000000"
+    }
+  ],
+  "Name": "XL"
+}

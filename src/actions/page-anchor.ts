@@ -29,6 +29,8 @@ interface PIMessage extends JsonObject {
 
 @action({ UUID: "com.johnmschoonover.decksync.anchor" })
 export class PageAnchorAction extends SingletonAction<AnchorSettings> {
+  private inFlightSwitches = new Set<string>();
+
   /**
    * Fires when the page containing this anchor becomes the active page.
    * Uses that signal to switch the paired device to the configured profile.
@@ -37,18 +39,28 @@ export class PageAnchorAction extends SingletonAction<AnchorSettings> {
     ev: WillAppearEvent<AnchorSettings>
   ): Promise<void> {
     const { targetDeviceId, targetProfile, enabled } = ev.payload.settings;
+    const sourceDeviceId = ev.action.device.id;
 
     if (!enabled || !targetProfile) return;
+
+    // Check if we have an in-flight switch for the appearing device and the targetProfile.
+    // If so, treat this as a plugin-initiated appear (RECEIVE) and do nothing.
+    const appearKey = `${sourceDeviceId}:${targetProfile}`;
+    if (this.inFlightSwitches.has(appearKey)) {
+      this.inFlightSwitches.delete(appearKey);
+      return;
+    }
 
     if (targetDeviceId) {
       // Sync a specific device.
       await streamDeck.profiles.switchToProfile(targetDeviceId, targetProfile);
+      this.inFlightSwitches.add(`${targetDeviceId}:${targetProfile}`);
     } else {
       // Sync every connected device that is NOT the one this anchor lives on.
-      const sourceDeviceId = ev.action.device.id;
       for (const device of streamDeck.devices) {
         if (device.id !== sourceDeviceId && device.isConnected) {
           await streamDeck.profiles.switchToProfile(device.id, targetProfile);
+          this.inFlightSwitches.add(`${device.id}:${targetProfile}`);
         }
       }
     }

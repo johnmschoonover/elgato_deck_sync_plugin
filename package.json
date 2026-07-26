@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "rollup -c",
-    "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\""
+    "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\"",
+    "test": "jest"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^29.0.3",

@@ -37,5 +37,31 @@
         }
       ]
     }
+  ],
+  "Profiles": [
+    {
+      "DeviceType": 1,
+      "Name": "profiles/mini",
+      "DontAutoSwitchWhenInstalled": false,
+      "Readonly": false
+    },
+    {
+      "DeviceType": 9,
+      "Name": "profiles/neo",
+      "DontAutoSwitchWhenInstalled": false,
+      "Readonly": false
+    },
+    {
+      "DeviceType": 0,
+      "Name": "profiles/original",
+      "DontAutoSwitchWhenInstalled": false,
+      "Readonly": false
+    },
+    {
+      "DeviceType": 2,
+      "Name": "profiles/xl",
+      "DontAutoSwitchWhenInstalled": false,
+      "Readonly": false
+    }
   ]
 }

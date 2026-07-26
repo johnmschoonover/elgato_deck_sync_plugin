@@ -1,0 +1,78 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Pages": [
+    {
+      "KeyCount": 6,
+      "Keys": [
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 1",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 2",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 3",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 4",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 5",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Action": "com.johnmschoonover.decksync.anchor",
+          "Settings": {
+            "targetProfile": "Default",
+            "enabled": true,
+            "targetDeviceId": ""
+          },
+          "Image": "imgs/actions/anchor/key",
+          "Title": "Page 6",
+          "TitleAlignment": "middle"
+        }
+      ],
+      "UUID": "deck-mini-uuid-000000000000000000000000"
+    }
+  ],
+  "Name": "Mini"
+}

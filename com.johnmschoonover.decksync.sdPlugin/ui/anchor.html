@@ -48,9 +48,34 @@
     </p>
   </details>
 
+  <!-- Scopes Management -->
+  <div class="sdpi-item" id="row-scopes">
+    <div class="sdpi-item-label">Scopes</div>
+    <div class="sdpi-item-value" id="scopes-container">
+      <div>Loading scopes...</div>
+    </div>
+  </div>
+
+  <!-- Roles Management -->
+  <div class="sdpi-item" id="row-roles">
+    <div class="sdpi-item-label">Roles</div>
+    <div class="sdpi-item-value" id="roles-container">
+      <div>Loading roles...</div>
+    </div>
+  </div>
+
+  <!-- Mappings Management -->
+  <div class="sdpi-item" id="row-mappings">
+    <div class="sdpi-item-label">Mappings</div>
+    <div class="sdpi-item-value" id="mappings-container">
+      <div>Loading mappings...</div>
+    </div>
+  </div>
+
   <script>
     const sdpiHandler = (() => {
-      let settings = {};
+      let actionSettings = {};
+      let globalSettings = {};
       let websocket = null;
       let uuid = null;
 
@@ -63,32 +88,205 @@
 
         // Ask the plugin for connected devices.
         sendToPlugin({ event: "getDevices" });
+        // Ask the plugin for global settings.
+        sendToPlugin({ event: "getGlobalSettings" });
       }
 
       function onMessage(e) {
         const data = JSON.parse(e.data);
 
         if (data.event === "didReceiveSettings") {
-          settings = data.payload.settings ?? {};
+          actionSettings = data.payload.settings ?? {};
           applySettings();
         }
 
-        if (data.event === "sendToPropertyInspector") {
+        if (data.event === "sendToPlugin") {
           const payload = data.payload;
           if (payload.event === "devicesUpdate") {
             populateDevices(payload.devices);
+          } else if (payload.event === "globalSettingsUpdate") {
+            globalSettings = payload.settings ?? {};
+            applySettings();
           }
         }
       }
 
       function applySettings() {
-        document.getElementById("enabled").checked = settings.enabled ?? true;
-        document.getElementById("targetDeviceId").value = settings.targetDeviceId ?? "";
-        document.getElementById("targetProfile").value = settings.targetProfile ?? "";
+        document.getElementById("enabled").checked = actionSettings.enabled ?? true;
+        document.getElementById("targetDeviceId").value = actionSettings.targetDeviceId ?? "";
+        document.getElementById("targetProfile").value = actionSettings.targetProfile ?? "";
+
+        // Apply global settings if present
+        if (globalSettings.scopes) {
+          populateScopes(globalSettings.scopes);
+        }
+        if (globalSettings.roles) {
+          populateRoles(globalSettings.roles);
+        }
+        if (globalSettings.mappings) {
+          populateMappings(globalSettings.mappings);
+        }
+      }
+
+      function populateScopes(scopes) {
+        const container = document.getElementById("scopes-container");
+        container.innerHTML = "";
+
+        if (scopes.length === 0) {
+          container.innerHTML = "<div>No scopes configured</div>";
+          return;
+        }
+
+        scopes.forEach((scope, index) => {
+          const scopeDiv = document.createElement("div");
+          scopeDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
+          scopeDiv.style.padding = "8px 0";
+
+          scopeDiv.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <strong>${scope.name}</strong> (${scope.deviceIds.length} devices)
+              </div>
+              <div>
+                <button class="sdpi-item-value" onclick="editScope(${index})">Edit</button>
+                <button class="sdpi-item-value" onclick="deleteScope(${index})">Delete</button>
+              </div>
+            </div>
+          `;
+
+          container.appendChild(scopeDiv);
+        });
+
+        // Add button
+        const addButton = document.createElement("button");
+        addButton.textContent = "Add Scope";
+        addButton.className = "sdpi-item-value";
+        addButton.onclick = addScope;
+        container.appendChild(addButton);
+      }
+
+      function populateRoles(roles) {
+        const container = document.getElementById("roles-container");
+        container.innerHTML = "";
+
+        if (roles.length === 0) {
+          container.innerHTML = "<div>No roles configured</div>";
+          return;
+        }
+
+        roles.forEach((role, index) => {
+          const roleDiv = document.createElement("div");
+          roleDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
+          roleDiv.style.padding = "8px 0";
+
+          roleDiv.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <strong>${role.name}</strong>
+                ${role.description ? `<br><small>${role.description}</small>` : ""}
+              </div>
+              <div>
+                <button class="sdpi-item-value" onclick="editRole(${index})">Edit</button>
+                <button class="sdpi-item-value" onclick="deleteRole(${index})">Delete</button>
+              </div>
+            </div>
+          `;
+
+          container.appendChild(roleDiv);
+        });
+
+        // Add button
+        const addButton = document.createElement("button");
+        addButton.textContent = "Add Role";
+        addButton.className = "sdpi-item-value";
+        addButton.onclick = addRole;
+        container.appendChild(addButton);
+      }
+
+      function populateMappings(mappings) {
+        const container = document.getElementById("mappings-container");
+        container.innerHTML = "";
+
+        if (mappings.length === 0) {
+          container.innerHTML = "<div>No mappings configured</div>";
+          return;
+        }
+
+        mappings.forEach((mapping, index) => {
+          const mappingDiv = document.createElement("div");
+          mappingDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
+          mappingDiv.style.padding = "8px 0";
+
+          mappingDiv.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <strong>${mapping.sourceProfile}</strong> → <strong>${mapping.targetProfile}</strong>
+                <br><small>Scope: ${mapping.scopeId}</small>
+                ${mapping.enabled !== false ? "" : "<br><small style='color: red'>Disabled</small>"}
+              </div>
+              <div>
+                <button class="sdpi-item-value" onclick="editMapping(${index})">Edit</button>
+                <button class="sdpi-item-value" onclick="deleteMapping(${index})">Delete</button>
+              </div>
+            </div>
+          `;
+
+          container.appendChild(mappingDiv);
+        });
+
+        // Add button
+        const addButton = document.createElement("button");
+        addButton.textContent = "Add Mapping";
+        addButton.className = "sdpi-item-value";
+        addButton.onclick = addMapping;
+        container.appendChild(addButton);
+      }
+
+      function addScope() {
+        // For now, just alert - in a real implementation this would open a modal
+        alert("Add Scope functionality would be implemented here");
+      }
+
+      function editScope(index) {
+        alert("Edit Scope functionality would be implemented here");
+      }
+
+      function deleteScope(index) {
+        if (confirm("Are you sure you want to delete this scope?")) {
+          alert("Delete Scope functionality would be implemented here");
+        }
+      }
+
+      function addRole() {
+        alert("Add Role functionality would be implemented here");
+      }
+
+      function editRole(index) {
+        alert("Edit Role functionality would be implemented here");
+      }
+
+      function deleteRole(index) {
+        if (confirm("Are you sure you want to delete this role?")) {
+          alert("Delete Role functionality would be implemented here");
+        }
+      }
+
+      function addMapping() {
+        alert("Add Mapping functionality would be implemented here");
+      }
+
+      function editMapping(index) {
+        alert("Edit Mapping functionality would be implemented here");
+      }
+
+      function deleteMapping(index) {
+        if (confirm("Are you sure you want to delete this mapping?")) {
+          alert("Delete Mapping functionality would be implemented here");
+        }
       }
 
       function saveSettings() {
-        settings = {
+        actionSettings = {
           enabled: document.getElementById("enabled").checked,
           targetDeviceId: document.getElementById("targetDeviceId").value,
           targetProfile: document.getElementById("targetProfile").value,
@@ -97,7 +295,7 @@
         websocket.send(JSON.stringify({
           event: "setSettings",
           context: uuid,
-          payload: settings,
+          payload: actionSettings,
         }));
       }
 
@@ -111,7 +309,7 @@
 
       function populateDevices(devices) {
         const select = document.getElementById("targetDeviceId");
-        const current = settings.targetDeviceId ?? "";
+        const current = actionSettings.targetDeviceId ?? "";
 
         // Remove old device options (keep the "All other devices" default).
         while (select.options.length > 1) select.remove(1);

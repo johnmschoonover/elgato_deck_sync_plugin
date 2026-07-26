@@ -2,6 +2,7 @@
 const mockStreamDeck = {
   actions: {
     registerAction: jest.fn(),
+    registeredActions: [],
   },
   connect: jest.fn(),
   profiles: {
@@ -13,6 +14,9 @@ const mockStreamDeck = {
   ],
   ui: {
     sendToPropertyInspector: jest.fn(),
+  },
+  settings: {
+    onDidReceiveGlobalSettings: jest.fn(),
   },
 };
 

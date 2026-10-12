@@ -299,6 +299,63 @@ describe("setup: scopes, roles, overrides", () => {
       .toEqual([{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 3 } }]);
   });
 
+  test("R7-F6 two saves in flight: only the reply to the last one confirms the draft", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "First");
+    $("save").click();
+    setInput(byLabel("Name of scope-1"), "Second");
+    $("save").click();
+    const [s1, s2] = ws.toPlugin("setGlobalSettings").map((p) => p.settings as Msg);
+    ws.fromPlugin({ event: "globalSettings", settings: s1, issues: [] });
+    expect(status()).toBe("Saving…"); // reply #1 is not the confirmation
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
+    ws.fromPlugin({ event: "globalSettings", settings: s2, issues: [] });
+    expect(status()).toBe("Saved.");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
+    setInput(byLabel("Profile for Deck P"), "profiles/x");
+    $("save").click();
+    expect((ws.toPlugin("setGlobalSettings")[2].settings as { scopes: Array<{ name: string }> }).scopes[0].name).toBe("Second"); // nothing reverted to First
+  });
+
+  test("R7-F11 a save confirmed after the watchdog gave up still clears the error and the dirty state", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as Msg;
+    jest.advanceTimersByTime(5000);
+    expect(status()).toBe("No reply from the plugin — is it running? Try Save again.");
+    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
+    expect(status()).toBe("Saved.");
+    $("discard").click();
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk"); // it was saved, so there is nothing to discard
+  });
+
+  test("R7-F12 a rejection arriving after Discard says so instead of asking to fix fields no longer shown", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    $("discard").click();
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }] });
+    expect(status()).toBe("The save sent earlier was rejected; the panel shows the last saved configuration:\n• page 9 is beyond the page count");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1");
+  });
+
+  test("R7-F13 a device push while a number is being typed keeps the text and its validity mark", () => {
+    const ws = loadedPanel();
+    const pages = byLabel<HTMLInputElement>("Page count of Deck P");
+    pages.focus();
+    setInput(pages, "0");
+    expect(pages.getAttribute("aria-invalid")).toBe("true");
+    ws.fromPlugin({ event: "devices", devices: [DEVICES[0], { ...DEVICES[1], isConnected: true }] }); // re-renders
+    const again = byLabel<HTMLInputElement>("Page count of Deck P");
+    expect(again.value).toBe("0");
+    expect(again.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(again);
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+  });
+
   test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
     // Saved: P parent with an override. Swapping roles makes that override stale (hidden, dropped on Save).
     const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };

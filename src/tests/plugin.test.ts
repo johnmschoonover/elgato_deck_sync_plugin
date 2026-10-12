@@ -6,9 +6,10 @@
 type Listener = (ev: never) => unknown;
 const mock = {
   logs: [] as Array<{ scope: string; level: string; msg: string }>,
+  // Like the SDK, a device is listed as not connected until its deviceDidConnect event.
   devices: [
-    { id: "P", name: "Deck P", type: 0, isConnected: true },
-    { id: "C1", name: "Deck C1", type: 1, isConnected: true },
+    { id: "P", name: "Deck P", type: 0, isConnected: false },
+    { id: "C1", name: "Deck C1", type: 1, isConnected: false },
   ],
   listeners: {} as Record<string, Listener[]>,
   registered: [] as unknown[],
@@ -60,6 +61,11 @@ const lines = (scope: string, re: RegExp) => mock.logs.filter((l) => l.scope ===
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 /** Fires every listener registered for the event (the engine's and the PI bridge's both listen to device events). */
 const fire = (name: string, ev: unknown) => Promise.all((mock.listeners[name] ?? []).map((l) => (l as (ev: unknown) => unknown)(ev)));
+/** The app announces a device: the SDK flips isConnected before the listeners run. */
+const connectDevice = (id: string) => {
+  mock.devices.find((d) => d.id === id)!.isConnected = true;
+  return fire("connect", { device: { id } });
+};
 const appear = (deviceId: string, pageIndex: number) =>
   (mock.registered[0] as PageAnchorAction).onWillAppear({ action: { id: `${deviceId}-p${pageIndex}`, device: { id: deviceId } }, payload: { settings: { pageIndex }, isInMultiAction: false } } as never);
 
@@ -70,6 +76,7 @@ beforeEach(() => {
   mock.stored = {};
   mock.listeners = {};
   mock.load = null;
+  for (const d of mock.devices) d.isConnected = false;
 });
 afterEach(() => jest.useRealTimers());
 
@@ -88,17 +95,29 @@ test("registers the action before connecting, starts after connect, and drives t
   expect(lines("sync", /^SETTINGS applied \(start\) scopes=\[desk\{parent=P,children=1,overrides=0\}\]/)).toHaveLength(1);
   expect(mock.switchCalls).toEqual([]);
 
-  // Device events and page events reach the engine; a human flip reaches the SDK's switchToProfile.
-  fire("disconnect", { device: { id: "C1" } });
-  fire("connect", { device: { id: "C1" } });
-  expect(lines("sync", /^DEVICE disconnected dev=C1/)).toHaveLength(1);
-  expect(lines("sync", /^DEVICE connected dev=C1/)).toHaveLength(1);
+  // Until the app announces a device it counts as disconnected (R7-F9): a flip skips it with a warning.
   await appear("P", 0);
   await appear("C1", 0);
   (mock.registered[0] as PageAnchorAction).onWillDisappear({ action: { id: "P-p0", device: { id: "P" } }, payload: { settings: { pageIndex: 0 }, isInMultiAction: false } } as never);
+  await appear("P", 1);
+  expect(mock.switchCalls).toEqual([]);
+  expect(lines("sync", /^SKIP target=C1 seq=1 reason=disconnected/)).toHaveLength(1);
+  // Device events and page events reach the engine; once announced, a human flip reaches the SDK's switchToProfile.
+  await connectDevice("C1");
+  expect(mock.logs.filter((l) => l.scope === "sync" && l.level === "debug" && /^DEVICE connected dev=C1 \(already armed; no change\)/.test(l.msg))).toHaveLength(1); // armed by its appear already
+  await fire("disconnect", { device: { id: "C1" } });
+  mock.devices[1].isConnected = false;
+  expect(lines("sync", /^DEVICE disconnected dev=C1/)).toHaveLength(1);
+  await connectDevice("C1");
+  expect(lines("sync", /^DEVICE connected dev=C1 \(disarmed until its first appear\)/)).toHaveLength(1);
+  await appear("C1", 0); // the reconnect burst
+  (mock.registered[0] as PageAnchorAction).onWillDisappear({ action: { id: "P-p1", device: { id: "P" } }, payload: { settings: { pageIndex: 1 }, isInMultiAction: false } } as never);
   await appear("P", 2);
   expect(mock.switchCalls).toEqual([["C1", "profiles/mini", 2]]);
   expect(lines("sync", /^SEND dev=P role=parent scope=desk page=2/)).toHaveLength(1);
+  // An edit of a visible anchor reaches the engine too (R7-F4).
+  await (mock.registered[0] as PageAnchorAction).onDidReceiveSettings({ action: { id: "P-p2", device: { id: "P" } }, payload: { settings: { pageIndex: 3 }, isInMultiAction: false } } as never);
+  expect(lines("sync", /^ANCHOR updated dev=P action=P-p2 page=2→3/)).toHaveLength(1);
 
   // After start the global-settings event is applied (a plain re-read changes nothing).
   fire("globalSettings", { settings: scopeSettings("Desk") });
@@ -155,7 +174,20 @@ test("a lost global-settings reply does not stall start-up: after 15 s the engin
   await jest.advanceTimersByTimeAsync(1);
   expect(lines("DeckSync", /^Settings: no reply from Stream Deck within 15000ms; starting with defaults/)).toHaveLength(1);
   expect(lines("sync", /^START devices=\[P,C1\] scopes=0 /)).toHaveLength(1);
-  fire("globalSettings", { settings: scopeSettings("Late") }); // the SDK raises the event when the reply finally comes
+  await fire("globalSettings", { settings: scopeSettings("Late") }); // the SDK raises the event when the reply finally comes
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
+});
+
+test("a reply that lands while start() is still replaying is applied once start has finished (R7-F7)", async () => {
+  jest.useFakeTimers();
+  let release: (s: unknown) => void = () => {};
+  mock.load = () => new Promise((resolve) => { release = resolve; });
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await jest.advanceTimersByTimeAsync(15_000);
+  expect(lines("sync", /^START .*scopes=0 /)).toHaveLength(1);
+  release(scopeSettings("Late")); // the read resolves after all (its event, had it come during start(), was ignored)
+  await jest.advanceTimersByTimeAsync(0);
   expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
 });
 

@@ -22,13 +22,15 @@ describe("toInput", () => {
 });
 
 describe("PageAnchorAction", () => {
-  test("forwards appear and disappear to the engine", async () => {
-    const engine = { onAppear: jest.fn(async () => ({ classification: "SEND", issued: [], skipped: [] })), onDisappear: jest.fn() };
+  test("forwards appear, disappear and settings edits to the engine", async () => {
+    const engine = { onAppear: jest.fn(async () => ({ classification: "SEND", issued: [], skipped: [] })), onDisappear: jest.fn(), onAnchorUpdated: jest.fn() };
     const anchor = new PageAnchorAction(engine as never);
     await anchor.onWillAppear(event({ pageIndex: 1 }));
     anchor.onWillDisappear(event({ pageIndex: 1 }));
+    anchor.onDidReceiveSettings(event({ pageIndex: 1 }));
     const expected = { deviceId: "P", actionId: "ctx-1", pageIndex: 1, enabled: true, isInMultiAction: false };
     expect(engine.onAppear).toHaveBeenCalledWith(expected);
     expect(engine.onDisappear).toHaveBeenCalledWith(expected);
+    expect(engine.onAnchorUpdated).toHaveBeenCalledWith(expected);
   });
 });

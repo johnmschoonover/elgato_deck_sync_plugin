@@ -40,10 +40,12 @@
  *   bounded without ever forgetting that a switch was issued.
  * - A conflicting-anchor breaker: a SEND that follows a RECEIVE on the same
  *   page visit is "driven" — the signature of a copied anchor with the wrong
- *   page index, which can make two decks drive each other forever. Too many
- *   driven sends from one device in a short span are ignored with a warning.
- *   A flip that only looked driven because the app reported the new page
- *   before the old page's disappear is uncounted when that disappear arrives.
+ *   page index, which can make two decks drive each other forever. A run of
+ *   driven sends from one device, uninterrupted by a flip that left the page
+ *   first, is cut off after `drivenSendMax` with a warning, however slow the
+ *   cycle. A flip that only looked driven because the app reported the new
+ *   page before the old page's disappear is uncounted when that disappear
+ *   arrives.
  */
 import { pageCountOf, resolveTargets, toCanonical } from "./mapping";
 import type { Log } from "./log";
@@ -83,10 +85,8 @@ export type EngineOptions = {
   pendingGraceMs?: number;
   /** Past this many still-expected switches to one device the oldest become echo tags only (default 50). */
   maxPendingPerDevice?: number;
-  /** More than this many driven sends from one device within `drivenSendWindowMs` trips the breaker (default 12). */
+  /** A run of more than this many driven sends from one device, with no flip that left the page first, trips the breaker (default 12). */
   drivenSendMax?: number;
-  /** Window for the conflicting-anchor breaker (default 30000 ms). */
-  drivenSendWindowMs?: number;
   /** Human appears queued before start() (default 20). */
   maxQueuedBeforeStart?: number;
 };
@@ -137,9 +137,6 @@ const TAG_WORD: Record<Exclude<Expiry, false>, string> = { ttl: "late", detached
 const inFlight = (p: Pending): boolean => !p.expired || p.expired === "detached";
 const NONE: ReadonlySet<string> = new Set();
 
-/** One driven send, for the conflicting-anchor breaker; an object so a late disappear can uncount exactly it. */
-type Stamp = { at: number };
-
 type Pending = {
   seq: number;
   page: number;
@@ -164,14 +161,14 @@ type DeviceState = {
   lastHumanPage: number | null;
   /** True while the current page was set by a RECEIVE and the device has not left it. */
   driven: boolean;
-  /** Recent driven sends, for the conflicting-anchor breaker. */
-  drivenSends: Stamp[];
+  /** Driven sends in a row, for the conflicting-anchor breaker; a flip that left the page first ends the run. */
+  drivenRun: number;
   /**
-   * The last driven send and the page the device was switched to before it. A disappear for
-   * that page arriving afterwards means the device did leave it (the app merely reported the
-   * new page first), so the send is uncounted. Cleared once anything else is issued to the device.
+   * The page the device was switched to before its last driven send. A disappear for that
+   * page arriving afterwards means the device did leave it (the app merely reported the new
+   * page first), so the send is uncounted. Cleared once anything else is issued to the device.
    */
-  drivenLeave: { page: number; stamp: Stamp } | null;
+  drivenLeave: { page: number } | null;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -179,7 +176,7 @@ type Plan = IssuedSwitch & { settled: Promise<void> };
 export type EngineSnapshot = {
   seq: number;
   started: boolean;
-  devices: Array<Omit<DeviceState, "pending" | "drivenSends" | "drivenLeave"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
+  devices: Array<Omit<DeviceState, "pending" | "drivenLeave"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
 };
 
 const ignored = (reason: IgnoreReason): Outcome => ({ classification: "IGNORED", reason, issued: [], skipped: [] });
@@ -199,7 +196,6 @@ export class SyncEngine {
   private readonly grace: number;
   private readonly cap: number;
   private readonly drivenMax: number;
-  private readonly drivenWindow: number;
   private readonly queueCap: number;
   private readonly log: Log;
 
@@ -208,7 +204,6 @@ export class SyncEngine {
     this.grace = Math.max(options.pendingGraceMs ?? 30000, this.ttl);
     this.cap = options.maxPendingPerDevice ?? 50;
     this.drivenMax = options.drivenSendMax ?? 12;
-    this.drivenWindow = options.drivenSendWindowMs ?? 30000;
     this.queueCap = options.maxQueuedBeforeStart ?? 20;
     this.log = deps.log;
   }
@@ -222,27 +217,35 @@ export class SyncEngine {
   async start(settings: GlobalSettings): Promise<void> {
     for (const d of this.deps.devices.list()) this.device(d.id);
     this.applySettings(settings, "start");
-    this.started = true;
     this.log.info(`START devices=[${[...this.devices.keys()].join(",")}] scopes=${this.settings.scopes.length} ttlMs=${this.ttl} graceMs=${this.grace} queued=${this.queued.length}`);
     // Nothing was in flight before start, so queued navigations never conflicted. They are
     // replayed in order through the normal rules, except that a fan-out skips any device whose
     // own later navigation is still to be replayed (it is where its own flip left it), and a
     // page the device had left before start is forgotten again after its replay so the next
-    // appear there is not read as a duplicate.
-    const replay = this.queued;
+    // appear there is not read as a duplicate. Classification is synchronous (only the app's
+    // acknowledgements are awaited), so a batch is replayed without a live appear slipping in
+    // between; navigation that arrives while the acknowledgements are awaited is queued and
+    // replayed next, and the engine counts as started only once nothing is queued.
+    let batch = this.queued;
     this.queued = [];
-    for (let i = 0; i < replay.length; i++) {
-      const { ev, left } = replay[i];
-      const later = new Set(replay.slice(i + 1).map((q) => q.ev.deviceId));
-      await this.handle(ev, later);
-      if (left) {
-        // Every outcome a queued appear can have records its page as the device's, so forgetting it is unconditional.
-        const dev = this.device(ev.deviceId);
-        dev.lastKnownPage = null;
-        dev.driven = false;
-        this.log.debug(`LEAVE dev=${ev.deviceId} page=${ev.pageIndex} (left before the settings loaded)`);
-      }
+    while (batch.length) {
+      const settled = batch.map(({ ev, left }, i) => {
+        const later = new Set(batch.slice(i + 1).map((q) => q.ev.deviceId));
+        const outcome = this.handle(ev, later, true);
+        if (left) {
+          // Every outcome a queued appear can have records its page as the device's, so forgetting it is unconditional.
+          const dev = this.device(ev.deviceId);
+          dev.lastKnownPage = null;
+          dev.driven = false;
+          this.log.debug(`LEAVE dev=${ev.deviceId} page=${ev.pageIndex} (left before the settings loaded)`);
+        }
+        return outcome;
+      });
+      await Promise.all(settled);
+      batch = this.queued;
+      this.queued = [];
     }
+    this.started = true;
   }
 
   /** Validated settings from the PI or the global-settings event. */
@@ -297,7 +300,7 @@ export class SyncEngine {
     dev.lastKnownPage = null; // it may come back on another page
     dev.pending = []; // nothing can land on an absent device
     dev.driven = false;
-    dev.drivenSends = [];
+    dev.drivenRun = 0;
     dev.drivenLeave = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
     // would arm the absent device and turn its reconnect burst into sends.
@@ -312,7 +315,7 @@ export class SyncEngine {
     return {
       seq: this.seq,
       started: this.started,
-      devices: [...this.devices.values()].map(({ drivenSends: _sends, drivenLeave: _leave, ...d }) => ({
+      devices: [...this.devices.values()].map(({ drivenLeave: _leave, ...d }) => ({
         ...d,
         pending: d.pending.map(({ seq, page, profile, originId, originRole, expired }) => ({ seq, page, profile, originId, originRole, expired })),
       })),
@@ -336,8 +339,7 @@ export class SyncEngine {
     } else if (dev.drivenLeave && dev.drivenLeave.page === ev.pageIndex) {
       // The device did leave the page it was switched to; the app just reported the new page
       // first. The send that followed was human after all, not a conflicting anchor.
-      const { stamp } = dev.drivenLeave;
-      dev.drivenSends = dev.drivenSends.filter((s) => s !== stamp);
+      dev.drivenRun = Math.max(0, dev.drivenRun - 1);
       dev.drivenLeave = null;
       this.log.debug(`LEAVE dev=${dev.id} page=${ev.pageIndex} (after the next page appeared; the send that followed was not driven)`);
     }
@@ -348,17 +350,42 @@ export class SyncEngine {
     return this.handle(ev, NONE);
   }
 
-  /** `excluded`: devices a fan-out must leave alone (their own queued navigation is replayed next). */
-  private async handle(ev: AppearInput, excluded: ReadonlySet<string>): Promise<Outcome> {
+  /**
+   * A visible Page Anchor's settings changed (its page index or enabled flag edited in the
+   * Property Inspector). The device is showing that page: record it, arm the device, and take
+   * a switch to that index as landed. Editing is not navigation, so nothing is sent.
+   */
+  onAnchorUpdated(ev: AppearInput): void {
+    if (ev.isInMultiAction) return;
+    const dev = this.device(ev.deviceId);
+    const before = dev.lastKnownPage ?? "none";
+    dev.driven = false;
+    dev.drivenLeave = null;
+    if (ev.pageIndex === undefined) {
+      dev.lastKnownPage = null;
+      this.log.info(`ANCHOR updated dev=${dev.id} action=${ev.actionId} page=${before}→none (page index cleared; the page is unknown until its next appear)`);
+      return;
+    }
+    this.expire(dev);
+    const consumed = this.consume(dev, ev.pageIndex);
+    this.arm(dev, ev.pageIndex);
+    this.log.info(`ANCHOR updated dev=${dev.id} action=${ev.actionId} page=${before}→${ev.pageIndex} enabled=${ev.enabled}${consumed ? ` (consumed seq=${consumed.seq})` : ""} (no sync)`);
+  }
+
+  /**
+   * `excluded`: devices a fan-out must leave alone (their own queued navigation is replayed
+   * next); `replay`: a queued navigation being replayed by start(), which must not be queued again.
+   */
+  private async handle(ev: AppearInput, excluded: ReadonlySet<string>, replay = false): Promise<Outcome> {
     try {
-      return await this.classify(ev, excluded);
+      return await this.classify(ev, excluded, replay);
     } catch (err) {
       this.log.error(`UNEXPECTED handler=onAppear dev=${ev.deviceId} page=${ev.pageIndex} error="${describeError(err)}"`);
       return ignored("error");
     }
   }
 
-  private async classify(ev: AppearInput, excluded: ReadonlySet<string>): Promise<Outcome> {
+  private async classify(ev: AppearInput, excluded: ReadonlySet<string>, replay: boolean): Promise<Outcome> {
     // 1. Anchors inside multi-actions are not page markers.
     if (ev.isInMultiAction) {
       this.log.debug(`IGNORED dev=${ev.deviceId} page=${ev.pageIndex} action=${ev.actionId} reason=multi-action`);
@@ -403,9 +430,9 @@ export class SyncEngine {
       return { classification: "STARTUP", issued: [], skipped: [] };
     }
 
-    // 6. Human navigation before the settings are known: replayed by start(). The queue keeps
-    //    the newest navigations — the last one decides where everyone ends up.
-    if (!this.started) {
+    // 6. Human navigation before the settings are known (or while start() is still replaying):
+    //    replayed by start(). The queue keeps the newest navigations.
+    if (!this.started && !replay) {
       if (this.queued.length >= this.queueCap) {
         const oldest = this.queued.shift()!.ev;
         this.log.warn(`QUEUE full dev=${dev.id} page=${page} reason=not-started — more than ${this.queueCap} navigations before the settings loaded; dropped the oldest (dev=${oldest.deviceId} page=${oldest.pageIndex})`);
@@ -420,6 +447,7 @@ export class SyncEngine {
     dev.lastKnownPage = page;
     const wasDriven = dev.driven;
     dev.driven = false;
+    if (!wasDriven) dev.drivenRun = 0; // the device left its page before this flip: not a stray-anchor cycle
 
     // 7. Scope membership.
     const scope = findScopeForDevice(this.settings, dev.id);
@@ -456,18 +484,15 @@ export class SyncEngine {
     //     page, means the page the plugin switched it to reports another index: a copied anchor
     //     with the wrong page index. Two such pages on two devices drive each other forever.
     if (wasDriven) {
-      const now = this.deps.clock.now();
-      dev.drivenSends = dev.drivenSends.filter((s) => now - s.at <= this.drivenWindow);
-      const stamp: Stamp = { at: now };
-      dev.drivenSends.push(stamp);
+      dev.drivenRun++;
       // If the app reports a new page before the old page's disappear, a human flip right after a
       // RECEIVE looks driven; the disappear of the page it was switched to, arriving next, uncounts it.
-      dev.drivenLeave = { page: pageBefore as number, stamp };
-      if (dev.drivenSends.length > this.drivenMax) {
-        this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=conflicting-anchors — ${dev.drivenSends.length} sends in ${this.drivenWindow}ms each right after the plugin switched this device; a Page Anchor on its pages reports the wrong page index (fix the anchor's page index)`);
+      dev.drivenLeave = { page: pageBefore as number };
+      if (dev.drivenRun > this.drivenMax) {
+        this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=conflicting-anchors — ${dev.drivenRun} sends in a row each right after the plugin switched this device, without it leaving the page first; a Page Anchor on its pages reports the wrong page index (fix the anchor's page index)`);
         return ignored("conflicting-anchors");
       }
-      this.log.debug(`DRIVEN dev=${dev.id} page=${page} action=${ev.actionId} (send right after a receive without leaving the page; ${dev.drivenSends.length}/${this.drivenMax})`);
+      this.log.debug(`DRIVEN dev=${dev.id} page=${page} action=${ev.actionId} (send right after a receive without leaving the page; ${dev.drivenRun}/${this.drivenMax})`);
     }
 
     // 11. SEND.
@@ -540,10 +565,11 @@ export class SyncEngine {
         }
         const state = this.device(target.deviceId);
         this.expire(state);
-        // Where the device will be: the tail of the switches still expected to land, but only if the
-        // stale rule will honour them — entries that all predate the device's own navigation would be
-        // undone when they land, so they predict nothing. An aligned target gets no switch.
-        const expected = fresh(state);
+        // Where the device will be: the tail of the switches still in flight (expected, or detached
+        // by a settings change), but only if the stale rule will honour them — entries that all predate
+        // the device's own navigation would be undone when they land, so they predict nothing. An
+        // aligned target gets no switch.
+        const expected = state.pending.filter(inFlight);
         const honoured = expected.some((p) => p.seq > state.lastHumanSeq) ? expected : [];
         const willShow = honoured.length ? honoured[honoured.length - 1].page : state.lastKnownPage;
         if (willShow === targetPage) {
@@ -619,7 +645,7 @@ export class SyncEngine {
       if (p.expired) continue;
       p.expired = "cap";
       expected--;
-      this.log.warn(`GC dev=${target.id} page=${p.page} seq=${p.seq} reason=cap — more than ${this.cap} unconfirmed switches to this device; kept as an echo tag only`);
+      this.log.warn(`GC dev=${target.id} page=${p.page} seq=${p.seq} reason=cap — more than ${this.cap} switches to this device still awaiting a landing; kept as an echo tag only`);
     }
     this.dedupeTags(target);
     const settled = Promise.resolve()
@@ -640,10 +666,11 @@ export class SyncEngine {
    * Consumes the earliest still-expected entry for `page`, or failing that the earliest expired
    * one. Preferring the fresh entry matters when a switch to the page was reissued after an
    * earlier one never landed: matching the expired tag would leave the fresh entry dangling
-   * (suppressing a child, predicting a position). Entries issued before the match are
+   * (suppressing a child, predicting a position). Everything issued before the match is
    * superseded — the app showed only the last of several switches, or still has them queued —
-   * and stay echo tags for one TTL so that if the app applies them after all, their landings
-   * can never read as navigation.
+   * and becomes an echo tag for one TTL from now: never in flight again (an older tag for the
+   * same page must not fight or outlive the landing that replaced it), yet if the app applies
+   * it after all its landing can never read as navigation.
    */
   private consume(dev: DeviceState, page: number): Pending | undefined {
     let i = dev.pending.findIndex((p) => p.page === page && !p.expired);
@@ -652,10 +679,9 @@ export class SyncEngine {
     const [entry] = dev.pending.splice(i, 1);
     const now = this.deps.clock.now();
     for (const s of dev.pending.slice(0, i)) {
-      if (s.expired) continue;
+      if (s.expired !== "superseded") this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.ttl}ms)`);
       s.expired = "superseded";
       s.issuedAt = now;
-      this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.ttl}ms)`);
     }
     this.dedupeTags(dev);
     return entry;
@@ -709,7 +735,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, driven: false, drivenSends: [], drivenLeave: null };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, driven: false, drivenRun: 0, drivenLeave: null };
       this.devices.set(id, dev);
     }
     return dev;

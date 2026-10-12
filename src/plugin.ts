@@ -58,11 +58,14 @@ streamDeck
     // Devices are known only after connecting; start never issues a switch.
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SETTINGS_LOAD_TIMEOUT_MS); });
-    const loaded = await Promise.race([loadGlobalSettings(log).then((r) => r.settings), timeout]);
+    const load = loadGlobalSettings(log);
+    const loaded = await Promise.race([load.then((r) => r.settings), timeout]);
     clearTimeout(timer);
     if (!loaded) log.warn(`Settings: no reply from Stream Deck within ${SETTINGS_LOAD_TIMEOUT_MS}ms; starting with defaults — they are applied when the reply arrives, or reopen a Page Anchor's Property Inspector to reload them.`);
     await engine.start(savedBeforeStart ?? loaded ?? createDefaultGlobalSettings());
     started = true;
     if (savedBeforeStart) engine.onSettingsChanged(savedBeforeStart); // a no-op unless it arrived during start()
+    // A late reply that lands while start() is still replaying is ignored by the event handler; apply it here (a no-op if the event already did).
+    if (!loaded) void load.then((r) => engine.onSettingsChanged(r.settings));
   })
   .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

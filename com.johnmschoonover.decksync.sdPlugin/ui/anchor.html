@@ -75,6 +75,7 @@
       let draft = clone(saved);               // what the user is editing
       let dirty = false;                      // draft differs from saved
       let statusWasSaving = false;            // a Save is awaiting the plugin's reply
+      let savesInFlight = 0;                  // replies carry no id: only the reply to the last Save sent confirms the draft
       let actionUuid = null;                  // this action's UUID, from actionInfo
       let saveTimer = null;                   // "no reply" watchdog for Save
       let loaded = false;                     // the first globalSettings reply has arrived
@@ -82,6 +83,7 @@
       let loadAttempts = 0;                   // initial-load retries
       let loadTimer = null;                   // "no reply" watchdog for the initial load
       let pendingSave = null;                 // the scopes as sent by Save, to notice edits made meanwhile
+      let lateSave = false;                   // the Save watchdog gave up, but its reply may still come
       let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
       let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
@@ -175,12 +177,16 @@
             devicesLoaded = true;
             initialStateArrived();
             renderThisDevice();
-            if (changed) renderSetup(); // a re-render discards the control being edited
+            if (changed) renderSetup(); // the focused box keeps its text and validity mark across the re-render
             break;
           }
           case "globalSettings": {
-            clearSaveTimeout();
             saved = payload.settings || { version: 2, scopes: [] };
+            if (savesInFlight > 0) savesInFlight--;
+            if (savesInFlight > 0) break; // an earlier Save's reply; the last one sent is what the draft must be compared with
+            clearSaveTimeout();
+            const confirmed = statusWasSaving || lateSave;
+            lateSave = false;
             let editedMeanwhile = false;
             if (!loaded) {
               // The first load is authoritative: nothing edited before it can be trusted.
@@ -192,7 +198,7 @@
               dirty = false;
               renderSetup();
               setStatus("", "");
-            } else if (statusWasSaving) {
+            } else if (confirmed) {
               // Edits made while the plugin was saving stay in the draft, still unsaved. A Discard
               // made meanwhile (dirty is false) adopts the confirmed configuration instead.
               editedMeanwhile = dirty && JSON.stringify(draft.scopes) !== pendingSave;
@@ -207,7 +213,7 @@
             }
             if (payload.issues && payload.issues.length) {
               setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
-            } else if (statusWasSaving) {
+            } else if (confirmed) {
               setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
             }
             statusWasSaving = false;
@@ -215,9 +221,14 @@
             break;
           }
           case "globalSettingsRejected":
+            if (savesInFlight > 0) savesInFlight--;
+            if (savesInFlight > 0) break;
             clearSaveTimeout();
             statusWasSaving = false; // the draft stays dirty so the user can fix it
-            setStatus("Not saved — fix these and try again:\n" + issuesText(payload.issues || []), "err");
+            lateSave = false;
+            setStatus((dirty
+              ? "Not saved — fix these and try again:\n"
+              : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []), "err");
             break;
         }
       }
@@ -380,7 +391,9 @@
         // Re-rendering replaces every control; put the keyboard focus (and caret) back where it was.
         const active = document.activeElement;
         const focused = focusNext || (active && active.dataset ? active.dataset.focus : null);
-        const caret = !focusNext && focused && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+        const typing = !focusNext && focused && active.tagName === "INPUT"; // a device push mid-edit must not drop the text being typed
+        const caret = typing && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+        const typed = typing ? { value: active.value, invalid: active.getAttribute("aria-invalid") } : null;
         focusNext = null;
         root.replaceChildren();
         try {
@@ -389,6 +402,10 @@
           if (focused) {
             const again = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
             if (again) {
+              if (typed) {
+                again.value = typed.value;
+                if (typed.invalid) again.setAttribute("aria-invalid", typed.invalid);
+              }
               again.focus();
               if (caret && typeof again.setSelectionRange === "function") {
                 try { again.setSelectionRange(caret[0], caret[1]); } catch { /* not a text control */ }
@@ -538,13 +555,15 @@
           return;
         }
         pendingSave = JSON.stringify(draft.scopes);
+        savesInFlight++;
         statusWasSaving = true; // the draft stays dirty until the plugin confirms
+        lateSave = false;
         setStatus("Saving…", "");
         clearSaveTimeout();
         saveTimer = setTimeout(() => {
           if (!statusWasSaving) return;
           statusWasSaving = false;
-          pendingSave = null;
+          lateSave = true; // a reply after all still confirms this draft
           setStatus("No reply from the plugin — is it running? Try Save again.", "err");
         }, 5000);
       });

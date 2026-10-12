@@ -1,4 +1,4 @@
-import { action, SingletonAction, type WillAppearEvent, type WillDisappearEvent } from "@elgato/streamdeck";
+import { action, SingletonAction, type DidReceiveSettingsEvent, type WillAppearEvent, type WillDisappearEvent } from "@elgato/streamdeck";
 import { ANCHOR_ACTION_UUID } from "../ids";
 import { normalizeAnchorSettings, type AnchorSettings } from "../settings";
 import type { AppearInput, SyncEngine } from "../syncEngine";
@@ -23,9 +23,16 @@ export class PageAnchorAction extends SingletonAction<AnchorSettings> {
   override onWillDisappear(ev: WillDisappearEvent<AnchorSettings>): void {
     this.engine.onDisappear(toInput(ev));
   }
+
+  /** The anchor's settings were edited in its Property Inspector, so its page is the one the device shows. */
+  override onDidReceiveSettings(ev: DidReceiveSettingsEvent<AnchorSettings>): void {
+    this.engine.onAnchorUpdated(toInput(ev));
+  }
 }
 
-export function toInput(ev: WillAppearEvent<AnchorSettings> | WillDisappearEvent<AnchorSettings>): AppearInput {
+type AnchorEvent = WillAppearEvent<AnchorSettings> | WillDisappearEvent<AnchorSettings> | DidReceiveSettingsEvent<AnchorSettings>;
+
+export function toInput(ev: AnchorEvent): AppearInput {
   const { pageIndex, enabled } = normalizeAnchorSettings(ev.payload.settings);
   return {
     deviceId: ev.action.device.id,

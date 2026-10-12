@@ -74,7 +74,6 @@
       let saved = { version: 2, scopes: [] }; // last settings confirmed by the plugin
       let draft = clone(saved);               // what the user is editing
       let dirty = false;                      // draft differs from saved
-      let statusWasSaving = false;            // "Saving…" is on screen
       let saveSeq = 0;                        // ids for saves; the plugin echoes the id in its reply
       let pendingSaveId = null;               // the Save whose reply confirms or rejects the draft (null: none)
       let actionUuid = null;                  // this action's UUID, from actionInfo
@@ -87,6 +86,7 @@
       let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
       let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
+      const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
       const collapsed = new Set();            // scope ids the user collapsed
 
       /* ---------------- Stream Deck plumbing ---------------- */
@@ -110,7 +110,6 @@
         const onDisconnected = () => {
           clearSaveTimeout();
           if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
-          statusWasSaving = false;
           pendingSaveId = null;
           $("save").disabled = true;
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
@@ -159,7 +158,8 @@
             if (!loaded) setStatus("Waiting for the plugin…", "");
             requestInitialState();
           } else if (!loaded) {
-            setStatus("No reply from the plugin — is it running? Close and reopen this panel.", "err");
+            // The app only delivers a panel's messages while its key is showing on a connected device.
+            setStatus("The plugin did not receive this panel's messages — make sure the device is connected and this page is showing on it, then close and reopen the panel.", "err");
           } else {
             setStatus("The plugin did not send its device list — close and reopen this panel to see every device.", "err");
           }
@@ -196,6 +196,7 @@
               $("addScope").disabled = false;
               draft = clone(saved);
               dirty = false;
+              invalidText.clear();
               renderSetup();
               setStatus("", "");
             } else if (confirmed) {
@@ -207,6 +208,7 @@
               if (!editedMeanwhile) {
                 draft = clone(saved);
                 dirty = false;
+                invalidText.clear();
                 renderSetup();
               }
             } else if (!dirty && pendingSaveId === null) {
@@ -218,17 +220,13 @@
             } else if (confirmed) {
               setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
             }
-            if (confirmed) {
-              statusWasSaving = false;
-              pendingSave = null;
-            }
+            if (confirmed) pendingSave = null;
             break;
           }
           case "globalSettingsRejected":
             if (payload.id !== pendingSaveId) break; // not the Save awaiting a verdict
             clearSaveTimeout();
-            pendingSaveId = null;
-            statusWasSaving = false; // the draft stays dirty so the user can fix it
+            pendingSaveId = null; // the draft stays dirty so the user can fix it
             pendingSave = null;
             setStatus((dirty
               ? "Not saved — fix these and try again:\n"
@@ -355,7 +353,7 @@
 
       function markDirty() {
         dirty = true;
-        setStatus("Unsaved changes.", "");
+        if (pendingSaveId === null) setStatus("Unsaved changes.", ""); // "Saving…" stays until the plugin answers
       }
 
       function change(fn) {
@@ -385,8 +383,11 @@
         const n = Number(raw);
         const bad = !!(input.validity && input.validity.badInput);
         const ok = !bad && raw !== "" && Number.isInteger(n) && n >= min;
-        input.setAttribute("aria-invalid", ok || (raw === "" && !bad) ? "false" : "true");
-        if (!ok && !(raw === "" && !bad)) setStatus(message, "err");
+        const invalid = !ok && !(raw === "" && !bad);
+        input.setAttribute("aria-invalid", invalid ? "true" : "false");
+        // An invalid value is not in the draft; remember its text so a re-render shows it again, still flagged.
+        if (invalid) invalidText.set(input.dataset.focus, bad ? input.value : raw); else invalidText.delete(input.dataset.focus);
+        if (invalid) setStatus(message, "err");
         return ok ? n : undefined;
       }
 
@@ -402,6 +403,10 @@
         root.replaceChildren();
         try {
           renderSetupInto(root);
+          for (const [key, text] of invalidText) {
+            const box = document.querySelector(`[data-focus="${CSS.escape(key)}"]`);
+            if (box) { box.value = text; box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
+          }
         } finally {
           if (focused) {
             const again = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
@@ -482,21 +487,39 @@
         for (const scope of draft.scopes) root.append(renderScope(scope));
       }
 
-      function renderScope(scope) {
+      function scopeSummary(scope) {
         const parent = scope.members.find((m) => m.role === "parent");
         const children = scope.members.filter((m) => m.role === "child");
-        const summaryText = `${scope.name || scope.id}: ` +
+        return `${scope.name || scope.id}: ` +
           (parent ? `parent ${deviceName(parent.deviceId)}` : "no parent") +
           `, ${children.length} child${children.length === 1 ? "" : "ren"}` +
           (scope.mapping.overrides.length ? `, ${scope.mapping.overrides.length} override(s)` : "");
+      }
+
+      /** A rename updates every label that carries the name in place; rebuilding the controls under the pointer would swallow the next click. */
+      function refreshScopeName(scope) {
+        const label = scope.name || scope.id;
+        const summary = document.querySelector(`[data-scope-summary="${CSS.escape(scope.id)}"]`);
+        if (summary) summary.textContent = scopeSummary(scope);
+        for (const option of document.querySelectorAll(`#setup select option[value="${CSS.escape(scope.id)}"]`)) option.textContent = label;
+        const remove = document.querySelector(`[data-focus="${CSS.escape(`rmscope:${scope.id}`)}"]`);
+        if (remove) remove.setAttribute("aria-label", `Remove scope ${label}`);
+        const add = document.querySelector(`[data-focus="${CSS.escape(`addov:${scope.id}`)}"]`);
+        if (add) add.setAttribute("aria-label", `Add override to ${label}`);
+      }
+
+      function renderScope(scope) {
+        const parent = scope.members.find((m) => m.role === "parent");
+        const children = scope.members.filter((m) => m.role === "child");
+        const summaryText = scopeSummary(scope);
         const box = el("details", {
           class: "ds-scope", open: !collapsed.has(scope.id),
           ontoggle: (ev) => { if (ev.target.open) collapsed.delete(scope.id); else collapsed.add(scope.id); },
-        }, el("summary", {}, summaryText));
+        }, el("summary", { "data-scope-summary": scope.id }, summaryText));
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
-          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); }, onchange: () => renderSetup() }),
+          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); refreshScopeName(scope); } }),
           el("button", { class: "ds-fixed", "aria-label": `Remove scope ${scope.name || scope.id}`, "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
 
         if (parent && children.length) {
@@ -561,18 +584,17 @@
         }
         pendingSaveId = id;
         pendingSave = JSON.stringify(draft.scopes);
-        statusWasSaving = true; // the draft stays dirty until the plugin confirms
-        setStatus("Saving…", "");
+        setStatus("Saving…", ""); // the draft stays dirty until the plugin confirms
         clearSaveTimeout();
         saveTimer = setTimeout(() => {
-          if (pendingSaveId !== id) return;
-          statusWasSaving = false; // the reply, should it still come, is accepted all the same
+          if (pendingSaveId !== id) return; // the reply, should it still come, is accepted all the same
           setStatus("No reply from the plugin — is it running? Try Save again.", "err");
         }, 5000);
       });
       $("discard").addEventListener("click", () => {
         draft = clone(saved);
         dirty = false;
+        invalidText.clear();
         if (pendingSaveId !== null) {
           // The save already went out and cannot be taken back; its confirmation is adopted as is.
           pendingSave = null;

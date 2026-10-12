@@ -10,10 +10,11 @@
  *
  * - Every `switchToProfile` the engine issues is recorded first, per target
  *   device, in issue order (`pending`). An appear whose page matches the
- *   earliest pending entry for that device is a RECEIVE: terminal, never
- *   rebroadcast. Entries issued before the match are superseded (the app
- *   showed only the last of several rapid switches, or still has them queued)
- *   and kept as echo tags for one TTL.
+ *   latest in-flight entry for that page on that device (else its latest
+ *   tag) is a RECEIVE: terminal, never rebroadcast. Earlier entries for the
+ *   same page are superseded (a landing satisfies every switch to that page)
+ *   and kept as echo tags for one TTL; entries for other pages stay in
+ *   flight, since the app may still have them queued.
  * - Any other appear on an armed device is human navigation → SEND to the
  *   rest of its scope, mapped through the parent's page (src/mapping.ts).
  * - Devices start un-armed; the first appear after plugin start or device
@@ -42,11 +43,17 @@
  *   visit (two anchors appearing without a disappear between them, or two
  *   indices disappearing together) carries a copied anchor with the wrong
  *   index, which can make two decks drive each other forever. Each such
- *   conflict adds to a per-device run; the run is cut off after
- *   `drivenSendMax` sends with a warning, however slow the cycle, and it is
- *   reset by a real page change (a disappear group with a single index). An
- *   app that reports a new page before the old page's disappear therefore
- *   never accumulates anything.
+ *   conflict adds to a per-device run; once the run exceeds `drivenSendMax`
+ *   the device's sends are ignored with a warning, however slow the cycle,
+ *   until a real page change (a disappear group with a single index) resets
+ *   it. An app that reports a new page before the old page's disappear
+ *   therefore never accumulates anything.
+ * - Leaving a page while a switch to it is still in flight: if nothing the
+ *   plugin issued explains the departure (no earlier switch queued ahead of
+ *   it, no RECEIVE that just moved the device off the page), the device was
+ *   on that page without the switch ever showing, and the entry becomes a
+ *   tag (`left`) for the grace period — never in flight again, so the
+ *   person's return is swallowed at most once and never fought.
  */
 import { pageCountOf, resolveTargets, toCanonical } from "./mapping";
 import type { Log } from "./log";
@@ -82,11 +89,11 @@ export type EngineDeps = { switcher: Switcher; clock: Clock; log: Log; devices: 
 export type EngineOptions = {
   /** After this long without an appear a pending switch stops suppressing/predicting/restoring (default 3000 ms). */
   pendingTtlMs?: number;
-  /** An expired entry stays an echo tag this long after it was issued (default 30000 ms). */
+  /** An expired entry stays an echo tag this long after it was issued (a left-page tag: after the disappear; a superseded tag lives one TTL instead) (default 30000 ms). */
   pendingGraceMs?: number;
   /** Past this many still-expected switches to one device the oldest become echo tags only (default 50). */
   maxPendingPerDevice?: number;
-  /** A run of more than this many conflicting sends from one device, with no real page change between them, trips the breaker (default 12). */
+  /** More than this many conflicts in a row (pages reporting two indices) on one device trips the breaker (default 12). */
   drivenSendMax?: number;
   /** Human appears queued before start() (default 20). */
   maxQueuedBeforeStart?: number;
@@ -132,8 +139,8 @@ type Origin = DeviceRole | "self";
  * Why an entry is no longer expected: past the TTL, detached by a settings change (still in
  * flight, so it can still be stale), pushed out by the cap, or superseded by a later landing.
  */
-type Expiry = false | "ttl" | "detached" | "cap" | "superseded";
-const TAG_WORD: Record<Exclude<Expiry, false>, string> = { ttl: "late", detached: "detached", cap: "capped", superseded: "superseded" };
+type Expiry = false | "ttl" | "detached" | "cap" | "superseded" | "left";
+const TAG_WORD: Record<Exclude<Expiry, false>, string> = { ttl: "late", detached: "detached", cap: "capped", superseded: "superseded", left: "left" };
 /** Still heading for the device: expected, or detached by a settings change. */
 const inFlight = (p: Pending): boolean => !p.expired || p.expired === "detached";
 const NONE: ReadonlySet<string> = new Set();
@@ -160,6 +167,10 @@ type DeviceState = {
   /** This device's most recent human navigation (SEND, or an ignored one it still chose). */
   lastHumanSeq: number;
   lastHumanPage: number | null;
+  /** The page of the RECEIVE that was this device's most recent appear (null once anything else happens on it). */
+  lastReceivePage: number | null;
+  /** The current page was recorded by a disabled anchor only; an enabled anchor on it may still send once. */
+  disabledOnly: boolean;
   /** Page indices reported by appears and not yet left: more than one means two anchors disagree on the page. */
   visit: Set<number>;
   /** Page indices that disappeared since the last appear (the current disappear group). */
@@ -299,6 +310,7 @@ export class SyncEngine {
     dev.visit.clear();
     dev.leaving.clear();
     dev.drivenRun = 0;
+    dev.lastReceivePage = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
     // would arm the absent device and turn its reconnect burst into sends.
     const queuedBefore = this.queued.length;
@@ -346,17 +358,22 @@ export class SyncEngine {
       dev.drivenRun++;
       this.log.debug(`CONFLICT dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (two page indices left one page together; ${dev.drivenRun}/${this.drivenMax})`);
     }
-    // A switch to this page still in flight has been overtaken: the device was on the page (it is
-    // leaving it) without the switch ever showing. It stays an echo tag for one TTL, never in flight,
-    // so the device's own return to the page is not read as a stale landing and fought.
+    // A switch to this page still in flight has been overtaken — the device was on the page (it is
+    // leaving it) without the switch ever showing — unless the plugin itself explains the departure:
+    // a switch to another page queued ahead of it (the app is working through the backlog), or a
+    // RECEIVE that just moved the device off this page (the app reports appears before disappears).
+    // An overtaken entry stays an echo tag for the grace period, never in flight, so the person's
+    // return to the page is swallowed at most once and never read as a stale landing and fought.
+    const explained = dev.lastReceivePage !== null && dev.lastReceivePage !== page;
     let left = 0;
-    for (const p of dev.pending) {
-      if (p.page !== page || !inFlight(p)) continue;
-      p.expired = "superseded";
+    dev.pending.forEach((p, i) => {
+      if (p.page !== page || !inFlight(p)) return;
+      if (explained || dev.pending.slice(0, i).some((f) => inFlight(f) && f.page !== page)) return;
+      p.expired = "left";
       p.issuedAt = this.deps.clock.now();
       left++;
-      this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=left-page (the device left the page before the switch showed; kept as an echo tag for ${this.ttl}ms)`);
-    }
+      this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=left-page (the device left the page before the switch showed; kept as an echo tag for ${this.grace}ms)`);
+    });
     if (left) this.dedupeTags(dev);
     // Only when the engine still believes the device is there, so appear(new)/disappear(old) order does not matter.
     if (dev.lastKnownPage === page) {
@@ -380,6 +397,8 @@ export class SyncEngine {
     const dev = this.device(ev.deviceId);
     const before = dev.lastKnownPage ?? "none";
     dev.visit.clear();
+    dev.lastReceivePage = null;
+    dev.disabledOnly = false;
     if (ev.pageIndex === undefined) {
       dev.lastKnownPage = null;
       this.log.info(`ANCHOR updated dev=${dev.id} action=${ev.actionId} page=${before}→none (page index cleared; the page is unknown until its next appear)`);
@@ -434,7 +453,8 @@ export class SyncEngine {
     dev.visit.add(page);
 
     // 3. The device is already known to be on this page: a second anchor on the page or a re-emit.
-    if (dev.lastKnownPage === page) {
+    //    (A page recorded by a disabled anchor only may still be sent once by an enabled one.)
+    if (dev.lastKnownPage === page && !(ev.enabled && dev.disabledOnly)) {
       const consumed = this.consume(dev, page);
       this.log.debug(`IGNORED dev=${dev.id} page=${page} action=${ev.actionId} reason=duplicate${consumed ? ` (consumed seq=${consumed.seq})` : ""}`);
       return ignored("duplicate");
@@ -445,8 +465,10 @@ export class SyncEngine {
     const entry = this.consume(dev, page);
     if (entry) {
       this.arm(dev, page);
+      dev.lastReceivePage = page;
       return this.receive(dev, page, entry);
     }
+    dev.lastReceivePage = null;
 
     // 5. Startup / reconnect guard (PRD §4.4): record the page, arm, never sync.
     if (!dev.armed) {
@@ -474,6 +496,7 @@ export class SyncEngine {
 
     // From here on this is human navigation. Record the physical fact first.
     dev.lastKnownPage = page;
+    dev.disabledOnly = false;
 
     // 7. Scope membership.
     const scope = findScopeForDevice(this.settings, dev.id);
@@ -501,6 +524,7 @@ export class SyncEngine {
 
     // 9. Disabled marker (PRD §7.3): the human still chose this page.
     if (!ev.enabled) {
+      dev.disabledOnly = true;
       this.recordHuman(dev, page);
       this.log.info(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} reason=disabled`);
       return ignored("disabled");
@@ -529,6 +553,7 @@ export class SyncEngine {
   private arm(dev: DeviceState, page: number): void {
     dev.armed = true;
     dev.lastKnownPage = page;
+    dev.disabledOnly = false;
   }
 
   private recordHuman(dev: DeviceState, page: number): void {
@@ -694,10 +719,11 @@ export class SyncEngine {
    * switch to the page the device already shows never produces another appear, so an earlier
    * entry left behind would dangle: suppressing a child, predicting a position), and because an
    * old tag for the page must not be matched while a fresh switch to it is still expected.
-   * Everything issued before the match is superseded — the app showed only the last of several
-   * switches, or still has them queued — and becomes an echo tag for one TTL from now: never in
-   * flight again (an older entry for the same page must not fight or outlive the landing that
-   * replaced it), yet if the app applies it after all its landing can never read as navigation.
+   * Earlier entries for the same page are superseded — a landing satisfies every switch to that
+   * page, and an older entry for it must not fight or outlive the landing that replaced it — and
+   * become echo tags for one TTL from now, never in flight again, yet still recognised if the
+   * app applies them after all. Earlier entries for other pages stay in flight: the app may still
+   * have them queued, and until they land (or expire) they keep suppressing and predicting.
    */
   private consume(dev: DeviceState, page: number): Pending | undefined {
     const last = (test: (p: Pending) => boolean): number => {
@@ -710,6 +736,7 @@ export class SyncEngine {
     const [entry] = dev.pending.splice(i, 1);
     const now = this.deps.clock.now();
     for (const s of dev.pending.slice(0, i)) {
+      if (s.page !== page) continue;
       if (s.expired !== "superseded") this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.ttl}ms)`);
       s.expired = "superseded";
       s.issuedAt = now;
@@ -745,9 +772,9 @@ export class SyncEngine {
   }
 
   /**
-   * Expired entries are echo tags only, so one per page suffices: keep the newest. Expired
-   * entries always precede still-expected ones (ageing and detaching follow issue order), so
-   * this never reorders anything a landing could match.
+   * Expired entries are echo tags only, so one per page suffices: keep the newest. Dropping an
+   * older tag never changes what a landing matches (in-flight entries are preferred, and among
+   * tags the latest).
    */
   private dedupeTags(dev: DeviceState): void {
     const seen = new Set<number>();
@@ -766,7 +793,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, visit: new Set(), leaving: new Set(), drivenRun: 0 };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0 };
       this.devices.set(id, dev);
     }
     return dev;

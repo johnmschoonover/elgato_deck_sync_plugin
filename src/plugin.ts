@@ -38,12 +38,14 @@ streamDeck.devices.onDeviceDidDisconnect((ev) => engine.onDeviceDisconnected(ev.
 // Until start() has finished (settings applied, pre-start navigation replayed) the event is
 // ignored and a save from the PI is held, so neither can interleave with the start-up load.
 let started = false;
+let saves = 0; // once the panel has saved, a read answered late is stale and must not revert the engine
 let savedBeforeStart: GlobalSettings | undefined;
-const handleGlobalSettings = createGlobalSettingsHandler(log, engine, () => started);
+const handleGlobalSettings = createGlobalSettingsHandler(log, engine, () => started, () => saves > 0);
 streamDeck.settings.onDidReceiveGlobalSettings((ev) => handleGlobalSettings(ev.settings));
 registerPropertyInspectorBridge({
   log,
   onSettingsSaved: (settings) => {
+    saves++;
     if (started) engine.onSettingsChanged(settings);
     else savedBeforeStart = settings;
   },
@@ -65,7 +67,13 @@ streamDeck
     await engine.start(savedBeforeStart ?? loaded ?? createDefaultGlobalSettings());
     started = true;
     if (savedBeforeStart) engine.onSettingsChanged(savedBeforeStart); // a no-op unless it arrived during start()
-    // A late reply that lands while start() is still replaying is ignored by the event handler; apply it here (a no-op if the event already did).
-    if (!loaded) void load.then((r) => engine.onSettingsChanged(r.settings));
+    // A late reply that lands while start() is still replaying is ignored by the event handler; apply it here
+    // (a no-op if the event already did) — unless the panel has saved meanwhile, in which case it is stale.
+    if (!loaded) {
+      void load.then((r) => {
+        if (saves === 0) engine.onSettingsChanged(r.settings);
+        else log.debug("Settings: the late reply is ignored; the configuration saved from the panel is already applied");
+      });
+    }
   })
   .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

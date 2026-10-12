@@ -8,7 +8,7 @@ import type { JsonValue } from "@elgato/utils";
 import { describeError, type Log } from "./log";
 import type { DeviceSummary, PluginToPi } from "./piProtocol";
 import { resolveProfile } from "./profiles";
-import { validateGlobalSettings, type GlobalSettings, type SettingsIssue, type ValidatedSettings } from "./settings";
+import { GLOBAL_SETTINGS_VERSION, validateGlobalSettings, type GlobalSettings, type SettingsIssue, type ValidatedSettings } from "./settings";
 
 export function listDevices(): DeviceSummary[] {
   return [...streamDeck.devices].map((d) => {
@@ -45,12 +45,18 @@ export type SettingsConsumer = { onSettingsChanged(settings: GlobalSettings): vo
 /**
  * Handles the SDK's global-settings event. Before the engine has started, the start-up
  * load applies the settings (the event also fires for the plugin's own read); afterwards
- * an unusable payload is ignored rather than replacing a working configuration.
+ * an unusable payload is ignored rather than replacing a working configuration, and once
+ * the panel has saved anything the event is ignored altogether: the plugin is the only
+ * writer, every save is applied directly, and a read answered late would revert it.
  */
-export function createGlobalSettingsHandler(log: Log, engine: SettingsConsumer, isStarted: () => boolean): (raw: unknown) => void {
+export function createGlobalSettingsHandler(log: Log, engine: SettingsConsumer, isStarted: () => boolean, hasSaved: () => boolean = () => false): (raw: unknown) => void {
   return (raw) => {
     if (!isStarted()) {
       log.debug("Settings: global-settings event before start; the start-up load applies them");
+      return;
+    }
+    if (hasSaved()) {
+      log.debug("Settings: global-settings event ignored; the configuration saved from the panel is already applied");
       return;
     }
     const { settings, issues, fatal } = validateGlobalSettings(raw);
@@ -102,6 +108,13 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
       }
       case "setGlobalSettings": {
         const tag = typeof p.id === "number" ? { id: p.id } : {}; // echoed so the PI matches the reply to its save
+        const body = p.settings as { version?: unknown } | null | undefined;
+        if (typeof body !== "object" || body === null || body.version !== GLOBAL_SETTINGS_VERSION) {
+          // A fresh-install payload is fine to load, but a save without settings would wipe every scope.
+          log.warn("Settings: rejected a save from the Property Inspector that carried no usable settings.");
+          await send({ event: "globalSettingsRejected", issues: [{ message: `The save carried no settings (expected an object with version ${GLOBAL_SETTINGS_VERSION}); nothing was changed.` }], ...tag });
+          return;
+        }
         const { settings, issues } = validateGlobalSettings(p.settings);
         if (issues.length) {
           log.warn(`Settings: rejected a save from the Property Inspector with ${issues.length} problem(s).`);

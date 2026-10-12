@@ -206,3 +206,28 @@ describe("R8-F6 save ids", () => {
     expect(mockState.sent[3]).toEqual({ event: "globalSettings", settings: validSettings, issues: [] });
   });
 });
+
+describe("R9-F7/R9-F8 after a save", () => {
+  test("a save without usable settings is rejected and nothing is written", async () => {
+    for (const settings of [undefined, null, {}, { version: 1, scopes: [] }, "x"]) {
+      mockState.sent.length = 0;
+      await message({ event: "setGlobalSettings", settings, id: 3 });
+      expect(mockState.sent).toEqual([{ event: "globalSettingsRejected", issues: [{ message: expect.stringContaining("carried no settings") }], id: 3 }]);
+    }
+    expect(mockState.stored).toEqual({});
+    expect(onSettingsSaved).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("no usable settings"));
+  });
+
+  test("the global-settings event is ignored once the panel has saved, so a read answered late cannot revert the engine", () => {
+    const engine = { onSettingsChanged: jest.fn() };
+    let saved = false;
+    const handle = createGlobalSettingsHandler(log, engine, () => true, () => saved);
+    handle(validSettings);
+    expect(engine.onSettingsChanged).toHaveBeenCalledTimes(1);
+    saved = true;
+    handle({ version: 2, scopes: [] });
+    expect(engine.onSettingsChanged).toHaveBeenCalledTimes(1);
+    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining("already applied"));
+  });
+});

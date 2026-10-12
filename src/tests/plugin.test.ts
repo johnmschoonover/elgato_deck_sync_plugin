@@ -146,9 +146,41 @@ test("settings arriving before start() has finished are not applied early: the e
   expect(lines("sync", /^START devices=\[P,C1\] scopes=1 /)).toHaveLength(1);
   expect(lines("sync", /^SETTINGS applied \(start\) scopes=\[desk/)).toHaveLength(1);
   expect(lines("sync", /^SETTINGS unchanged \(update\)/)).toHaveLength(1); // re-applying it after start is a no-op
-  // From now on saves and events are applied directly.
+  // From now on saves are applied directly, and a read answered late (the event) can no longer revert them (R9-F7).
   await fire("sendToPlugin", { payload: { event: "setGlobalSettings", settings: { version: GLOBAL_SETTINGS_VERSION, scopes: [] } } });
   expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[\]/)).toHaveLength(1);
+  await fire("globalSettings", { settings: scopeSettings("Stale read") });
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(0);
+  expect(lines("DeckSync", /already applied/)).toHaveLength(1);
+});
+
+test("the late start-up read is dropped when the panel has saved meanwhile (R9-F7)", async () => {
+  jest.useFakeTimers();
+  let release: (s: unknown) => void = () => {};
+  mock.load = () => new Promise((resolve) => { release = resolve; });
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await jest.advanceTimersByTimeAsync(15_000);
+  expect(lines("sync", /^START .*scopes=0 /)).toHaveLength(1);
+  await fire("sendToPlugin", { payload: { event: "setGlobalSettings", settings: scopeSettings("Saved after start") } });
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
+  release({ version: GLOBAL_SETTINGS_VERSION, scopes: [] }); // the old read answers at last: stale
+  await jest.advanceTimersByTimeAsync(0);
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[\]/)).toHaveLength(0);
+});
+
+test("a start-up read answered after the 15 s timeout is applied by the read itself when nothing was saved meanwhile", async () => {
+  jest.useFakeTimers();
+  let release: (s: unknown) => void = () => {};
+  mock.load = () => new Promise((resolve) => { release = resolve; });
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await jest.advanceTimersByTimeAsync(15_000);
+  expect(lines("sync", /^START .*scopes=0 /)).toHaveLength(1);
+  release(scopeSettings("Late read")); // the read answers after the engine started with defaults; no event is raised for it here
+  await jest.advanceTimersByTimeAsync(0);
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
+  expect(lines("DeckSync", /late reply is ignored/)).toHaveLength(0);
 });
 
 test("a PI save that arrives while the start-up load is pending becomes the start configuration (R5-F16)", async () => {
@@ -200,7 +232,8 @@ test("a reply that lands while start() is still replaying is applied once start 
   await jest.advanceTimersByTimeAsync(15_000);
   expect(lines("sync", /^START .*scopes=1 .*queued=1$/)).toHaveLength(1);
   expect(mock.switchCalls).toEqual([["C1", "profiles/mini", 1]]);
-  // While start() is still busy the event and the read both arrive: the event is ignored, the read is applied afterwards.
+  // While start() is still busy the event and the read both arrive: the event is ignored, and so is the read once
+  // start() has finished — the panel's save is newer than anything the read can answer (R9-F7).
   await fire("globalSettings", { settings: scopeSettings("Late") });
   expect(lines("DeckSync", /global-settings event before start/)).toHaveLength(1);
   release(scopeSettings("Late"));
@@ -208,8 +241,9 @@ test("a reply that lands while start() is still replaying is applied once start 
   expect(lines("sync", /^SETTINGS applied \(update\)/)).toHaveLength(0); // not before start() has finished
   ack();
   await jest.advanceTimersByTimeAsync(0);
-  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1); // the late read, once
   expect(lines("sync", /^SETTINGS unchanged \(update\)/)).toHaveLength(1); // the held save re-applied as a no-op
+  expect(lines("sync", /^SETTINGS applied \(update\)/)).toHaveLength(0); // the late read never reverts the save
+  expect(lines("DeckSync", /^Settings: the late reply is ignored; the configuration saved from the panel is already applied/)).toHaveLength(1);
 });
 
 test("a failed connect is logged as a start-up failure, never thrown", async () => {

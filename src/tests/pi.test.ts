@@ -23,6 +23,8 @@ class FakeSocket {
   send(data: string) { this.sent.push(JSON.parse(data)); }
   private emit(type: string, ev: unknown) { for (const fn of this.listeners.get(type) ?? []) fn(ev); }
   open() { this.readyState = 1; this.emit("open", {}); }
+  /** A raw frame, as a broken peer might send one. */
+  emitRaw(data: string) { this.emit("message", { data }); }
   close() { this.readyState = 3; this.emit("close", {}); }
   receive(msg: Msg) { this.emit("message", { data: JSON.stringify(msg) }); }
   fromPlugin(payload: Msg) { this.receive({ event: "sendToPropertyInspector", payload }); }
@@ -110,7 +112,7 @@ describe("connect and load", () => {
     jest.advanceTimersByTime(3000);
     expect(ws.toPlugin("getGlobalSettings")).toHaveLength(3);
     jest.advanceTimersByTime(3000);
-    expect(status()).toBe("No reply from the plugin — is it running? Close and reopen this panel.");
+    expect(status()).toBe("The plugin did not receive this panel's messages — make sure the device is connected and this page is showing on it, then close and reopen the panel.");
     expect(ws.toPlugin("getGlobalSettings")).toHaveLength(3);
   });
 
@@ -342,15 +344,48 @@ describe("setup: scopes, roles, overrides", () => {
     expect(status()).toBe("Not saved — fix these and try again:\n• nope"); // a rejection for the current save is honoured
   });
 
-  test("R8-F9 renaming a scope refreshes the dropdown, the summary and the button names once the box is left", () => {
+  test("R8-F9/R9-F6 renaming a scope refreshes the dropdown, the summary and the button names in place, keeping the controls", () => {
     loadedPanel();
     const name = byLabel<HTMLInputElement>("Name of scope-1");
+    const remove = byLabel<HTMLButtonElement>("Remove scope Scope 1");
+    name.focus();
     setInput(name, "Desk");
-    expect(document.querySelector(".ds-scope summary")!.textContent).toBe("Scope 1: parent Deck P, 1 child"); // not yet
-    name.dispatchEvent(new Event("change"));
     expect(document.querySelector(".ds-scope summary")!.textContent).toBe("Desk: parent Deck P, 1 child");
-    expect(byLabel("Remove scope Desk")).not.toBeNull();
+    expect(remove.getAttribute("aria-label")).toBe("Remove scope Desk");
+    expect(byLabel("Add override to Desk")).not.toBeNull();
     expect([...byLabel<HTMLSelectElement>("Scope for Deck P").options].map((o) => o.textContent)).toContain("Desk");
+    expect(remove.isConnected).toBe(true); // the same button is still in the document: a click that follows the rename lands
+    expect(document.activeElement).toBe(name);
+    name.dispatchEvent(new Event("change"));
+    expect(remove.isConnected).toBe(true);
+  });
+
+  test("R9-F10 an invalid number survives a re-render, still flagged, until it is fixed", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Page count of Deck P"), "0");
+    select(byLabel("Role of Deck C1 (disconnected)"), "parent"); // re-renders everything
+    const pages = byLabel<HTMLInputElement>("Page count of Deck P");
+    expect(pages.value).toBe("0");
+    expect(pages.getAttribute("aria-invalid")).toBe("true");
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+    setInput(byLabel("Page count of Deck P"), "6");
+    select(byLabel("Role of Deck P"), "parent"); // re-renders again: the fixed value is in the draft, nothing is flagged
+    expect(byLabel<HTMLInputElement>("Page count of Deck P").value).toBe("6");
+    expect(byLabel<HTMLInputElement>("Page count of Deck P").getAttribute("aria-invalid")).not.toBe("true");
+    $("save").click();
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(1);
+    $("discard").click();
+    expect(byLabel<HTMLInputElement>("Page count of Deck P").value).toBe("");
+  });
+
+  test("R9-F11 editing while a save is pending keeps 'Saving…' on screen", () => {
+    loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    setInput(byLabel("Name of scope-1"), "Desk 2");
+    expect(status()).toBe("Saving…");
   });
 
   test("R8-F13 odd inputs: a socket error, malformed JSON, a reply without settings, edits while disconnected, an unknown device", () => {
@@ -358,8 +393,9 @@ describe("setup: scopes, roles, overrides", () => {
     expect($("thisDevice").textContent).toBe("(unknown)");
     ws.receive({ event: "sendToPropertyInspector", payload: { event: "globalSettings", issues: [] } } as Msg); // no settings: defaults
     expect($("setup").textContent).toContain("No Stream Deck devices known yet.");
-    (ws as unknown as { emitRaw: (d: string) => void }).emitRaw?.("not json");
+    ws.emitRaw("not json"); // ignored
     ws.receive({ event: "nonsense" });
+    expect($("setup").textContent).toContain("No Stream Deck devices known yet.");
     ws.close();
     setInput($("pageIndex"), "2");
     expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");

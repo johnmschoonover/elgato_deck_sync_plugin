@@ -192,8 +192,8 @@
             // A reply to a Save carries its id; one for a Save that a later Save replaced (or whose
             // watchdog-era twin arrives late) is ignored. A reply without an id is a plain load.
             const confirmed = payload.id !== undefined;
+            saved = payload.settings || { version: 2, scopes: [] }; // whatever the plugin confirms it now holds, this Save's or an earlier one's
             if (confirmed && payload.id !== pendingSaveId) break;
-            saved = payload.settings || { version: 2, scopes: [] };
             let editedMeanwhile = false;
             let applied = confirmed; // a confirmation always reports its problems; a plain load only when it was adopted
             if (!loaded) {
@@ -326,9 +326,13 @@
         return draft.scopes[draft.scopes.length - 1];
       }
 
+      const memberMemory = new Map(); // deviceId → { profile, pageCount } of a member moved out of a scope, kept for its next scope
+
       function removeFromScope(deviceId) {
         const s = scopeOf(deviceId);
         if (!s) return;
+        const member = s.members.find((m) => m.deviceId === deviceId);
+        if (member) memberMemory.set(deviceId, { profile: member.profile, pageCount: member.pageCount });
         s.members = s.members.filter((m) => m.deviceId !== deviceId);
         s.mapping.overrides = s.mapping.overrides.filter((o) => o.a.deviceId !== deviceId && o.b.deviceId !== deviceId);
         syncParentId(s);
@@ -337,7 +341,12 @@
       function assignToScope(deviceId, scope) {
         removeFromScope(deviceId);
         const hasParent = scope.members.some((m) => m.role === "parent");
-        scope.members.push({ deviceId, role: hasParent ? "child" : "parent" });
+        // A profile and page count describe the device, not the scope: they follow it.
+        const kept = memberMemory.get(deviceId) || {};
+        const member = { deviceId, role: hasParent ? "child" : "parent" };
+        if (kept.profile) member.profile = kept.profile;
+        if (kept.pageCount !== undefined) member.pageCount = kept.pageCount;
+        scope.members.push(member);
         syncParentId(scope);
       }
 
@@ -400,9 +409,10 @@
         const ok = !bad && raw !== "" && Number.isInteger(n) && n >= min;
         const invalid = !ok && !(raw === "" && !bad);
         input.setAttribute("aria-invalid", invalid ? "true" : "false");
-        // An invalid value is not in the draft; remember its text so a re-render shows it again, still flagged.
-        if (invalid) invalidText.set(input.dataset.focus, bad ? input.value : raw);
-        else if (raw === "" && blankPending) invalidText.set(input.dataset.focus, "");
+        // An invalid value is not in the draft; remember its text so a re-render shows it again, still
+        // flagged (a browser reports text it cannot parse, like "7e", as a bad input with a blank value).
+        if (invalid) invalidText.set(input.dataset.focus, { text: bad ? input.value : raw, invalid: true });
+        else if (raw === "" && blankPending) invalidText.set(input.dataset.focus, { text: "", invalid: false });
         else invalidText.delete(input.dataset.focus);
         if (invalid) setStatus(message, "err");
         return ok ? n : undefined;
@@ -410,6 +420,7 @@
 
       function renderSetup() {
         const root = $("setup");
+        for (const id of [...collapsed]) if (!draft.scopes.some((s) => s.id === id)) collapsed.delete(id); // a removed scope's id may be handed out again
         // Re-rendering replaces every control; put the keyboard focus (and caret) back where it was.
         const active = document.activeElement;
         const focused = focusNext || (active && active.dataset ? active.dataset.focus : null);
@@ -420,11 +431,11 @@
         root.replaceChildren();
         try {
           renderSetupInto(root);
-          for (const [key, text] of invalidText) {
+          for (const [key, kept] of invalidText) {
             const box = document.querySelector(`[data-focus="${CSS.escape(key)}"]`);
             // A box that is gone or disabled (its device unassigned) cannot be fixed, so it must not block Save.
             // A remembered blank is shown blank, unflagged until Save (which flags blank override boxes).
-            if (box && !box.disabled) { box.value = text; if (text !== "") box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
+            if (box && !box.disabled) { box.value = kept.text; if (kept.invalid) box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
           }
         } finally {
           if (focused) {

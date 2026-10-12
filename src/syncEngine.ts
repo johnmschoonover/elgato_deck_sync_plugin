@@ -156,6 +156,8 @@ type Pending = {
   issuedAt: number;
   /** Once set, the entry is an echo tag only. */
   expired: Expiry;
+  /** For a superseded entry: the switch whose landing wrote it off — revived as a tag if this entry shows after all. */
+  supersededBy?: { seq: number; page: number; profile: string; originId: string; originRole: Origin };
 };
 
 type DeviceState = {
@@ -181,6 +183,8 @@ type DeviceState = {
   drivenRun: number;
   /** Sends in a row made while a switch from another deck to a different page of this device had not shown (the overturned-switch breaker). */
   overturnRun: number;
+  /** The page a disappear just took the device off; an appear for it with nothing between is a re-emit, not a landing. */
+  leftPage: number | null;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -322,6 +326,7 @@ export class SyncEngine {
     dev.drivenRun = 0;
     dev.overturnRun = 0;
     dev.lastReceivePage = null;
+    dev.leftPage = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
     // would arm the absent device and turn its reconnect burst into sends.
     const queuedBefore = this.queued.length;
@@ -389,6 +394,7 @@ export class SyncEngine {
     // Only when the engine still believes the device is there, so appear(new)/disappear(old) order does not matter.
     if (dev.lastKnownPage === page) {
       dev.lastKnownPage = null;
+      dev.leftPage = page;
       this.log.debug(`LEAVE dev=${dev.id} page=${page}`);
     }
   }
@@ -419,6 +425,7 @@ export class SyncEngine {
     dev.lastReceivePage = null;
     dev.disabledOnly = false;
     dev.overturnRun = 0;
+    dev.leftPage = null;
     this.warnedNoPage.delete(ev.actionId); // an index cleared (or set) later is worth a fresh warning
     if (ev.pageIndex === undefined) {
       dev.lastKnownPage = null;
@@ -473,6 +480,12 @@ export class SyncEngine {
     if (dev.leaving.size === 1) dev.drivenRun = 0;
     dev.leaving.clear();
     dev.visit.add(page);
+    // The page a disappear just took the device off, reported again with nothing between: the app
+    // re-emitting the anchors of a page a device already shows on a switch to it (hardware risk 2),
+    // or a return from a page without an anchor. Either way the device never changed page, so this
+    // is not the landing of a switch queued behind another.
+    const reemit = dev.leftPage === page;
+    dev.leftPage = null;
 
     // 3. The device is already known to be on this page: a second anchor on the page or a re-emit.
     //    (A page recorded by a disabled anchor only may still be sent once by an enabled one. A
@@ -480,7 +493,8 @@ export class SyncEngine {
     //    since — through an anchor edit — and the navigation is still owed its fan-out.)
     //    A switch to this page is satisfied by the re-emit only if it is the next the app would apply:
     //    behind a switch to another page it is still to show, and the device will come back here.
-    if (!replay && dev.lastKnownPage === page && !(ev.enabled && dev.disabledOnly)) {
+    if (!replay && (dev.lastKnownPage === page || reemit) && !(ev.enabled && dev.disabledOnly)) {
+      dev.lastKnownPage = page; // (after a re-emit's disappear the engine had forgotten it)
       const consumed = this.nextInLine(dev, page) ? this.consume(dev, page) : undefined;
       const queued = !consumed && dev.pending.some((p) => p.page === page && inFlight(p));
       this.log.debug(`IGNORED dev=${dev.id} page=${page} action=${ev.actionId} reason=duplicate${consumed ? ` (consumed seq=${consumed.seq})` : ""}${queued ? " (a switch to this page waits behind an older one; kept)" : ""}`);
@@ -591,17 +605,22 @@ export class SyncEngine {
     //      anchors of a page a device already shows (hardware risk 2), every page reporting a
     //      single index, out of the conflict breaker's sight. A run of overturning sends with no
     //      landing between is cut off the same way; a send with nothing outstanding ends the run.
-    const overturned = dev.pending.find((p) => p.originId !== dev.id && p.page !== page && (inFlight(p) || p.expired === "ttl"));
-    if (overturned) {
-      dev.overturnRun++;
-      this.log.debug(`OVERTURN dev=${dev.id} page=${page} outstanding=[page=${overturned.page} seq=${overturned.seq} origin=${overturned.originId}] action=${ev.actionId} (a send while another deck's switch to this device has not shown; ${dev.overturnRun}/${this.drivenMax})`);
-    } else {
-      dev.overturnRun = 0;
-    }
-    if (dev.overturnRun > this.drivenMax) {
-      this.recordHuman(dev, page);
-      this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=overturned-switches — ${dev.overturnRun} sends in a row while a switch from another deck to this device never showed; a page on this device reports the wrong page index, or has no Page Anchor (fix the anchor). Sends resume once a switch lands here, or after a flip made with nothing outstanding`);
-      return ignored("overturned-switches");
+    //      Children only: every such cycle has at least one child sending in turn, and cutting that
+    //      child off breaks it, whereas a parent's change is never suppressed (PRD §6.3.3) — not even
+    //      after a child's coalesced burst left tags on the parent that no landing will ever clear.
+    if (member.role === "child") {
+      const overturned = dev.pending.find((p) => p.originId !== dev.id && p.page !== page && (inFlight(p) || p.expired === "ttl"));
+      if (overturned) {
+        dev.overturnRun++;
+        this.log.debug(`OVERTURN dev=${dev.id} page=${page} outstanding=[page=${overturned.page} seq=${overturned.seq} origin=${overturned.originId}] action=${ev.actionId} (a send while another deck's switch to this device has not shown; ${dev.overturnRun}/${this.drivenMax})`);
+      } else {
+        dev.overturnRun = 0;
+      }
+      if (dev.overturnRun > this.drivenMax) {
+        this.recordHuman(dev, page);
+        this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=overturned-switches — ${dev.overturnRun} sends in a row while a switch from another deck to this device never showed; a page on this device reports the wrong page index, or has no Page Anchor (fix the anchor). Sends resume once a switch lands here, or after a flip made with nothing outstanding`);
+        return ignored("overturned-switches");
+      }
     }
 
     // 11. SEND.
@@ -634,6 +653,21 @@ export class SyncEngine {
       dev.lastHumanPage !== null &&
       !dev.pending.some((p) => inFlight(p) && p.seq > dev.lastHumanSeq);
     const tag = entry.expired ? ` ${TAG_WORD[entry.expired]}=true` : "";
+    if (entry.expired === "superseded" && entry.supersededBy && entry.supersededBy.page !== page) {
+      // A switch the engine had written off showed after all: the landing that superseded it was the
+      // person's own flip, and the app is still working through its queue. Its siblings get a fresh
+      // TTL, and the switch that superseded them — consumed by that flip — is still to show: revived
+      // as a tag, in its place in the order, so its landing is an echo too.
+      const by = entry.supersededBy;
+      const now = this.deps.clock.now();
+      for (const p of dev.pending) if (p.expired === "superseded" && (p.supersededBy?.seq === by.seq || p.seq === by.seq)) p.issuedAt = now;
+      if (!dev.pending.some((p) => p.seq === by.seq)) {
+        const at = dev.pending.findIndex((p) => p.seq > by.seq);
+        dev.pending.splice(at < 0 ? dev.pending.length : at, 0, { ...by, issuedAt: now, expired: "superseded" });
+        this.dedupeTags(dev);
+        this.log.debug(`GC dev=${dev.id} page=${by.page} seq=${by.seq} reason=revived (a switch it had superseded showed after all, so it is still queued in the app; kept as an echo tag for ${this.ttl}ms)`);
+      }
+    }
     if (!stale) {
       this.log.info(`RECEIVE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId} scope=${scope}${tag} (echo consumed; no rebroadcast)`);
       return { classification: "RECEIVE", seq: entry.seq, late, issued: [], skipped: [] };
@@ -804,6 +838,7 @@ export class SyncEngine {
       this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.ttl}ms)`);
       s.expired = "superseded";
       s.issuedAt = now;
+      s.supersededBy = { seq: entry.seq, page: entry.page, profile: entry.profile, originId: entry.originId, originRole: entry.originRole };
     }
     this.dedupeTags(dev);
     return entry;
@@ -844,7 +879,7 @@ export class SyncEngine {
     const seen = new Set<number>();
     for (let i = dev.pending.length - 1; i >= 0; i--) {
       const p = dev.pending[i];
-      if (!p.expired) continue;
+      if (inFlight(p)) continue; // a detached entry is still in flight, not a tag: it keeps its place
       if (seen.has(p.page)) {
         dev.pending.splice(i, 1);
         this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=duplicate-tag (a newer tag for the page is kept)`);
@@ -857,7 +892,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0 };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0, leftPage: null };
       this.devices.set(id, dev);
     }
     return dev;

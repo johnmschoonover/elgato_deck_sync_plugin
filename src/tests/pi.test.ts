@@ -540,6 +540,67 @@ describe("setup: scopes, roles, overrides", () => {
     expect(status()).toBe("Saved; you have further unsaved changes.");
   });
 
+  test("R12-F5 the confirmation of a Save that a later Save replaced still updates what the panel takes as saved", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    setInput(byLabel("Name of scope-1"), "Desk 2");
+    $("save").click();
+    const [first, second] = ws.toPlugin("setGlobalSettings");
+    const desk = { version: 2, scopes: [{ ...SAVED.scopes[0], name: "Desk" }] };
+    ws.fromPlugin({ event: "globalSettings", settings: desk, issues: [], id: first.id }); // the plugin holds "Desk" now
+    expect(status()).toBe("Saving…"); // the second Save is still awaiting its verdict
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "Could not save settings (boom)." }], id: second.id });
+    expect(status()).toMatch(/^Not saved — fix these and try again:/);
+    $("discard").click();
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk"); // what the plugin holds, not the stale load
+    expect(status()).toBe("");
+  });
+
+  test("R12-F6 a device's profile and page count follow it into another scope, and back from — not synced —", () => {
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", profile: "profiles/xl", pageCount: 7 }], mapping: { mode: "positional", overrides: [] } }] };
+    const ws = loadedPanel(saved);
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("profiles/xl");
+    select(byLabel("Scope for Deck C1 (disconnected)"), "__new");
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("profiles/xl");
+    expect(byLabel<HTMLInputElement>("Page count of Deck C1 (disconnected)").value).toBe("7");
+    select(byLabel("Scope for Deck C1 (disconnected)"), "");
+    select(byLabel("Scope for Deck C1 (disconnected)"), "scope-1");
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("profiles/xl");
+    expect(byLabel<HTMLInputElement>("Page count of Deck C1 (disconnected)").value).toBe("7");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(sent.scopes[0].members).toContainEqual({ deviceId: "C1", role: "child", profile: "profiles/xl", pageCount: 7 });
+  });
+
+  test("R12-F10 text the browser cannot parse (a bad input with a blank value) stays flagged across a re-render and blocks Save", () => {
+    const ws = loadedPanel();
+    const box = byLabel<HTMLInputElement>("Page count of Deck P");
+    Object.defineProperty(box, "validity", { value: { badInput: true } }); // as Chromium reports "7e"
+    setInput(box, "");
+    expect(box.getAttribute("aria-invalid")).toBe("true");
+    ws.fromPlugin({ event: "devices", devices: [DEVICES[0], { ...DEVICES[1], isConnected: true }] }); // re-renders
+    const again = byLabel<HTMLInputElement>("Page count of Deck P");
+    expect(again.value).toBe("");
+    expect(again.getAttribute("aria-invalid")).toBe("true");
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first: Page count of Deck P.");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+  });
+
+  test("R12-F11 a new scope that reuses a removed scope's id is not shown collapsed", () => {
+    loadedPanel();
+    const section = document.querySelector<HTMLDetailsElement>("details.ds-scope")!;
+    section.open = false;
+    section.dispatchEvent(new Event("toggle"));
+    byLabel<HTMLButtonElement>("Remove scope Scope 1").click();
+    expect(document.querySelector("details.ds-scope")).toBeNull();
+    $("addScope").click();
+    const fresh = document.querySelector<HTMLDetailsElement>("details.ds-scope")!;
+    expect(fresh.querySelector("summary")!.textContent).toContain("Scope 1");
+    expect(fresh.open).toBe(true);
+  });
+
   test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
     // Saved: P parent with an override. Swapping roles makes that override stale (hidden, dropped on Save).
     const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };

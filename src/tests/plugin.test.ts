@@ -258,3 +258,14 @@ test("a failed connect is logged as a start-up failure, never thrown", async () 
   expect(lines("DeckSync", /^Startup failed: no app$/)).toHaveLength(1);
   expect(lines("sync", /^START/)).toHaveLength(0);
 });
+
+test("device events for a device the SDK does not know are ignored with a debug line (R12-F9)", async () => {
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await settle();
+  await expect(fire("connect", { device: undefined })).resolves.toBeDefined();
+  await expect(fire("disconnect", { device: undefined })).resolves.toBeDefined();
+  expect(lines("DeckSync", /^Devices: connect event for a device the SDK does not know; ignored$/)).toHaveLength(1);
+  expect(lines("DeckSync", /^Devices: disconnect event for a device the SDK does not know; ignored$/)).toHaveLength(1);
+  expect(lines("sync", /^DEVICE /)).toHaveLength(0);
+});

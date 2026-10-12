@@ -31,8 +31,9 @@ const engine = new SyncEngine({
 // Register all actions before connecting.
 streamDeck.actions.registerAction(new PageAnchorAction(engine));
 
-streamDeck.devices.onDeviceDidConnect((ev) => engine.onDeviceConnected(ev.device.id));
-streamDeck.devices.onDeviceDidDisconnect((ev) => engine.onDeviceDisconnected(ev.device.id));
+// The SDK hands over `undefined` for a device id it has never seen; the event is then nothing to act on.
+streamDeck.devices.onDeviceDidConnect((ev) => { if (ev.device) engine.onDeviceConnected(ev.device.id); else log.debug("Devices: connect event for a device the SDK does not know; ignored"); });
+streamDeck.devices.onDeviceDidDisconnect((ev) => { if (ev.device) engine.onDeviceDisconnected(ev.device.id); else log.debug("Devices: disconnect event for a device the SDK does not know; ignored"); });
 
 // Settings reach the engine validated: from the PI's save, or from the global-settings event.
 // Until start() has finished (settings applied, pre-start navigation replayed) the event is

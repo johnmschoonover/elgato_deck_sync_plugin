@@ -34,9 +34,12 @@ the Stream Deck app; no scripts or daemons.
 ## Requirements
 
 - Stream Deck app **7.1+** on macOS 13+ or Windows 10+ (Node.js 24 runtime is bundled with the app).
-- Two or more Stream Deck devices. Bundled profiles exist for the Original/MK.2, Mini, XL
-  and Neo once they are authored (see below); other device types need a profile name set
-  in the configuration UI.
+- Two or more Stream Deck devices. **No profiles are bundled yet** — they must be exported
+  from the Stream Deck app and added per [`docs/PROFILES.md`](docs/PROFILES.md) before sync
+  can run. Defaults are wired for the Original/MK.2, Mini, XL and Neo; any other device type
+  (including the Stream Deck +) needs a profile name set in the configuration UI.
+- Internet access the first time the Property Inspector opens: it loads Elgato's
+  `sdpi.css` stylesheet from `cdn.elgato.com`. Offline it still works, unstyled.
 
 ## Install (development build)
 
@@ -75,18 +78,28 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
 
 ## Reading the log
 
-`com.johnmschoonover.decksync.sdPlugin/logs/` — one line per event, scope `sync`:
+Logs are written to `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored). Engine
+lines carry the `sync` scope; settings and Property Inspector lines the `DeckSync` scope.
+Lines marked *(debug)* appear only while the manifest has `Nodejs.Debug` enabled (the
+development build does); a release build logs info and above.
 
 | Line | Meaning |
 |---|---|
+| `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000` | engine started after connect |
+| `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P (echo consumed; no rebroadcast)` | a switch the plugin issued landed |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s) |
+| `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
-| `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch was landing |
-| `IGNORED … reason=disabled` / `no-scope` / `no-page-index` / `duplicate` | why nothing was sent |
-| `SKIP target=C2 … reason=disconnected` (warn) | member skipped, with the fix |
-| `SWITCH failed dev=C1 profile=… error="…"` (warn) | the app rejected a switch |
-| `SETTINGS applied … droppedPending=0` | configuration (re)loaded |
+| `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
+| `IGNORED … reason=disabled` / `no-scope` / `no-page-index` (warn, once) | why nothing was sent |
+| `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
+| `SKIP target=C2 … reason=disconnected` / `no-profile` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
+| `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
+| `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
+| `DEVICE connected` / `DEVICE disconnected … droppedPending=n` | device events |
+| `LEAVE dev=P page=2`, `GC …` *(debug)* | a page was left / an old tag was dropped |
+| `Settings: …` (warn, `DeckSync` scope) | a scope was rejected and why; `PI: …` lines concern the Property Inspector |
 
 ## Troubleshooting
 
@@ -96,13 +109,17 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
   `manifest.json → Profiles`, or the device type has no default; set *Profile*.
 - **One device never follows** — its *Pages* count may be lower than the page being sent
   (`SKIP … no-counterpart`), or it is disconnected (`SKIP … disconnected`).
-- **A page flip did nothing once right after a switch** — expected only if the target page
-  had no anchor; see the GC notes in [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
+- **A page flip did nothing once right after a switch** — expected only when the page you
+  flipped to is one the plugin had just tried to switch that device to and the switch never
+  confirmed (`SWITCH unconfirmed` in the log); see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
+- **The Property Inspector is unstyled** — it could not load `sdpi.css` from
+  `cdn.elgato.com`; everything still works.
 
 ## Limitations
 
 - Top-level pages only; folders/subpages are detected but not driven (Spike-1 pending).
-- Bundled profiles only; no Stream Deck + profile is bundled yet (set *Profile* manually).
+- Bundled profiles only. None are bundled yet (D1 pending), and the Stream Deck + has no
+  default profile name (set *Profile* manually).
 - Button state is not synced, only the page.
 
 ## Development
@@ -110,10 +127,14 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
 ```bash
 npm run typecheck   # tsc --noEmit (strict, native decorators)
 npm run build       # rollup
-npm test            # jest — settings, mapping, engine, PI bridge, assets
+npm test            # jest — settings, mapping, engine, PI bridge, anchor adapter, profiles, assets (7 suites, coverage thresholds enforced)
 npm run validate    # streamdeck validate
 npm run icons       # regenerate placeholder icons
 ```
+
+Before a release (PRD Epic E5): remove `Nodejs.Debug` from `manifest.json` (it runs the
+plugin with `--inspect` and raises log verbosity), replace the placeholder icons, and settle
+the final UUID/author domain (PRD OQ-6).
 
 | Path | What |
 |---|---|

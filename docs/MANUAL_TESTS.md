@@ -14,7 +14,7 @@ folder). Plugin log: `com.johnmschoonover.decksync.sdPlugin/logs/`.
 |---|---|
 | Install / link the plugin, restart Stream Deck. | "Deck Sync" category appears in the actions list with the Page Anchor action and its icon. |
 | Open Preferences → Plugins. | Deck Sync is listed; no warning badge. |
-| Open the log file. | No errors at startup; a `DeckSync` scope line showing it connected. |
+| Open the log file. | No error lines. The `sync` scope shows `SETTINGS applied (start) …` and `START devices=[…] scopes=…`. |
 | `npm run validate` on the same build. | "Validation successful". |
 
 ## Gate B — configuration persists (PRD §7.2)
@@ -23,9 +23,9 @@ folder). Plugin log: `com.johnmschoonover.decksync.sdPlugin/logs/`.
 |---|---|
 | Drag a Page Anchor onto any key of P. Open its Property Inspector. | *Page index* empty, *Enabled* on, "This marker is on device P". |
 | Set *Page index* to `0`. Click another key, then the anchor again. | *Page index* still shows `0` (PI hydration, PRD §8.3). |
-| In **Deck Sync setup**: for P choose *New scope…*; for C choose *scope-1*. | P shows role Parent, C shows Child; the scope box lists "parent P, 1 child". Status "Unsaved changes." |
-| Click **Save**. | Status "Saved." Log: `Settings saved: 1 scope(s).` |
-| Change P's role to Child and Save. | Status "Not saved: … a scope needs exactly one parent; found 0." Nothing persisted. Click **Discard** → P is Parent again. |
+| In **Deck Sync setup (all devices)**: for P choose *New scope…*; for C choose *Scope 1*. | P shows role Parent, C shows Child; the scope box reads "Scope 1: parent P, 1 child". Status "Unsaved changes." |
+| Click **Save**. | Status "Saved." Log (`DeckSync` scope): `Settings saved: 1 scope(s).` |
+| Change P's role to Child and Save. | Status "Not saved: … a scope needs exactly one parent; found 0." Nothing persisted. Click **Discard changes** → P is Parent again. |
 | Quit and relaunch Stream Deck; open the anchor's PI. | The scope, roles and names are exactly as saved. |
 
 ## Gate C — sync behaviour (PRD §7.3)
@@ -45,7 +45,9 @@ positional mapping.
 | C-7 | Unplug C. Flip P. | P flips normally; log: a `warn` naming C as disconnected/skipped. No error dialogs. |
 | C-8 | Plug C back in (it shows its last page). | **Nothing moves** on reconnect. Log: C's appears classified as startup/ignored. Then flip P → C follows again. |
 | C-9 | Simultaneously (as close as you can) flip P to page 0 and C to page 3. | Both end on **page 0** (parent wins). No oscillation. |
-| C-10 | Remove C from the scope and Save. Flip P. | Nothing happens on C; log: a warning that P's scope has no other members / C has no scope (wording may differ). |
+| C-10 | Set both devices to *— not synced —* (or click **Remove scope**) and Save. Flip P. | Nothing happens on C. Log: `IGNORED dev=P page=N reason=no-scope — …` once at info. Re-create the scope afterwards. |
+| C-11 | Rapid burst: on P press right, right, left, left as fast as possible (0→1→2→1→0). | C ends on page 0. Log: does C show `RECEIVE` lines for the intermediate pages (1, 2, 1) or only `SWITCH unconfirmed` warnings? Record which — it tells us whether the app shows every switch or only the last. |
+| C-12 | Put the Mac/PC to sleep for a minute right after flipping P, then wake it. Flip nothing else. | After wake, nothing moves on its own. If a `RECEIVE … late=true` line appears in the log, that is the late echo being absorbed correctly; a `SEND` line without a human flip would be a bug. |
 
 ## Gate D3 — install → customise → sync
 
@@ -68,6 +70,6 @@ See `docs/SPIKE1.md` for the procedure and the result slot.
 
 ## Results
 
-| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-10 | D3 | Notes |
+| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-12 | D3 | Notes |
 |---|---|---|---|---|---|---|---|---|
 | | | | | | | | | |

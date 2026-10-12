@@ -7,8 +7,8 @@
 | **Status** | Ready for execution (v2.0 — parent/child scope model) |
 | **Author** | John Schoonover |
 | **Editors** | Drafted by Summit (v0.1); hardened (v1.0); re-architected to the parent/child/scope model (v2.0) |
-| **Last updated** | June 2026 |
-| **Repo** | `deck_sync_plugin` |
+| **Last updated** | October 2026 (§6.5 example, §8 and §10 refreshed; the v2.0 model is unchanged) |
+| **Repo** | `johnmschoonover/elgato_deck_sync_plugin` |
 | **Execution model** | Scoped tasks executed by Claude Code (cloud sessions), one branch/PR per task; John reviews at gates of his choosing (typically after a task set completes). |
 
 > **How to read this document.** §1–6 are product and architecture context. §7 holds the normative feature requirements with **acceptance criteria (AC)** — the contract Claude builds against — each tagged **[agent]** (Claude can verify headless) or **[gate]** (requires John on real hardware). §8 records current repo state and blocking gaps. §9 is the sequenced build plan tasks are cut from. §10 records resolved decisions. **MUST** = hard requirement; **SHOULD** = strong default revisitable at a gate.
@@ -81,7 +81,7 @@ The SDK has no event for "the active page changed." The plugin can only learn a 
 - Stream Deck SDK **v2.1** (`@elgato/streamdeck`, resolved 2.1.0); Stream Deck app **v7.1+**.
 - Node.js **v24** (manifest `Nodejs.Version`).
 - TypeScript **5.x** with **native TC39 class decorators** — never legacy `experimentalDecorators`.
-- Rollup build **must bundle the SDK's transitive CommonJS dependency `ws`** — currently broken (§8.1).
+- Rollup build **must bundle the SDK's transitive CommonJS dependency `ws`** — done via `@rollup/plugin-commonjs` (§8.1, resolved).
 
 ### 4.6 No on-disk profile editing
 
@@ -109,11 +109,11 @@ The plugin communicates exclusively via the official WebSocket API and never wri
 | Component | Responsibility |
 |---|---|
 | **Page Anchor action** (`src/actions/page-anchor.ts`) | The per-page marker. Fires `onWillAppear`/`onWillDisappear` so the plugin can detect navigation. Stores only its **page identity** (e.g. page index/label) and an `enabled` toggle — *not* sync targets. |
-| **Sync engine** (in the plugin) | Owns the runtime logic: receives marker appear events, applies the causal send/receive rule (§6.3), resolves mappings (§6.4), enforces parent precedence, and issues `switchToProfile` calls with echo tagging. |
-| **Configuration UI** | Global-settings UI to assign device roles, build scopes, and set page mappings (positional default + overrides). May be a Property Inspector and/or a global settings page. |
-| **Property Inspector** (`ui/anchor.html`) | Shown when a Page Anchor is selected; lets the user confirm/adjust the marker's page identity and enabled state. Must hydrate from saved settings (§8.3). |
-| **Plugin entry** (`src/plugin.ts`) | Registers the action, connects to the Stream Deck WebSocket, wires the sync engine, and handles `onSendToPlugin` (e.g. `getDevices`). |
-| **Bundled profiles** (`*.sdProfile`) | One bundled profile per supported device type, multi-page, pre-placed with Page Anchors. Registered in manifest `Profiles`, offered on install. |
+| **Sync engine** (`src/syncEngine.ts`, with `settings.ts`, `mapping.ts`, `profiles.ts`) | Owns the runtime logic: receives marker appear events, applies the causal send/receive rule (§6.3), resolves mappings (§6.4), enforces parent precedence, and issues `switchToProfile` calls with echo tagging. Pure TypeScript; the SDK is injected (`docs/SYNC_ENGINE.md`). |
+| **Configuration UI** | Global-settings UI to assign device roles, build scopes, and set page mappings (positional default + overrides). Lives in the Page Anchor's Property Inspector, since Stream Deck has no plugin-level settings page. |
+| **Property Inspector** (`ui/anchor.html`) | Shown when a Page Anchor is selected; lets the user confirm/adjust the marker's page identity and enabled state and hosts the configuration UI. Hydrates from saved settings (§8.3, resolved). |
+| **Plugin entry** (`src/plugin.ts`) | Builds the engine over the SDK, registers the action, connects, forwards device and settings events, starts the engine after connect. PI messages (`getDevices`, `getGlobalSettings`, `setGlobalSettings`) are handled by `src/piBridge.ts` (`src/piProtocol.ts`). |
+| **Bundled profiles** (`profiles/<device>.streamDeckProfile`) | One bundled profile per supported device type, multi-page, pre-placed with Page Anchors. Registered in manifest `Profiles`, offered on install. Authored on hardware (`docs/PROFILES.md`). |
 
 ### 6.3 Sync model — the causal send/receive rule
 
@@ -138,25 +138,29 @@ This is the heart of v1 behavior and **MUST** be implemented exactly:
 
 ```jsonc
 {
+  "version": 2,                                        // any other version is rejected wholesale (defaults + warn)
   "scopes": [
     {
       "id": "scope-1",
       "name": "Desk",
-      "parentDeviceId": "<device.id>",
+      "parentDeviceId": "<device.id>",                   // derived from the parent member when blank
       "members": [
-        { "deviceId": "<device.id>", "role": "parent", "profile": "Deck Sync — SD+" },
-        { "deviceId": "<device.id>", "role": "child",  "profile": "Deck Sync — Original" }
+        { "deviceId": "<device.id>", "role": "parent", "profile": "profiles/plus", "pageCount": 5 },
+        { "deviceId": "<device.id>", "role": "child",  "profile": "profiles/original" }
+        // profile = manifest Profiles[].Name, defaulted by device type when blank; pageCount defaults to 5
       ],
       "mapping": {
-        "mode": "positional",                 // positional default
-        "overrides": [                          // optional explicit pairs (bidirectional)
-          { "a": { "deviceId": "...", "page": 2 }, "b": { "deviceId": "...", "page": 5 } }
+        "mode": "positional",                            // positional default
+        "overrides": [                                     // optional pins: a = a parent page, b = a child page (bidirectional)
+          { "a": { "deviceId": "<parent>", "page": 2 }, "b": { "deviceId": "<child>", "page": 4 } }
         ]
       }
     }
   ]
 }
 ```
+
+Invalid scopes are dropped individually with a warning; the rest are kept (§8.6).
 
 **Per Page Anchor instance settings:**
 
@@ -269,6 +273,8 @@ No bundled profiles exist. The four hand-written JSON files previously in `profi
 - **No settle window.** The startup guard is a per-device armed flag: the first appear after start or (re)connect never syncs.
 - **Stale-switch handling.** A switch that lands after a device's own later send is swallowed and the page restored; a send from a device with switches still heading for it re-asserts its page. This is how "a parent's SEND overrides anything in flight" is realised (`docs/SYNC_ENGINE.md`).
 - No Stream Deck + profile is in the §7.4 list although §6.6's example uses an SD+ as parent; with an SD+ in a scope its `profile` must be set explicitly until one is bundled.
+- **Parent precedence is per device, not scope-wide.** A child is suppressed only while a parent-issued switch *to that child* is still expected; once it has landed the child may lead again even if a sibling's switch is still in flight. The alternative — treating the parent's send as in flight until every child acknowledges — stalls every child behind one that never acknowledges. One of the two independent designs preferred scope-wide; ratify.
+- **Unconfirmed switches stay echo tags.** After 3 s an unconfirmed switch stops suppressing children and stops counting as the device's position, but it remains an echo tag for 30 s so a late landing (app stall, sleep/wake) can never be mistaken for human navigation and rebroadcast. The bounded cost: a human navigation to exactly that page within the window is swallowed once (`docs/SYNC_ENGINE.md`); hardware checks C-11/C-12 in `docs/MANUAL_TESTS.md`.
 
 ### 8.7 Not yet verified on hardware
 
@@ -288,7 +294,7 @@ Dependency-ordered. Each epic is a candidate review gate.
 
 **Epic D — Bundled profiles & zero-config UX.** D1 Author per-device multi-page bundled profiles with pre-placed anchors **[gate / manual procedure]** (§7.4 authoring note). D2 Manifest `Profiles` wiring + install prompt **[agent]**. D3 Validate install → customize → sync happy path **[gate]**.
 
-**Epic E — Quality & release.** E1 Test suite + documented manual test matrix across device combos. E2 CI (build + typecheck). E3 README + open-source license. E4 Final icons/screenshots/demo per Marketplace requirements (depends on OQ-7). E5 Marketplace submission checklist + final UUID/author domain (OQ-6).
+**Epic E — Quality & release.** E1 Test suite + documented manual test matrix across device combos. E2 CI (typecheck + build + validate + test, Node 22/24). E3 README + open-source license. E4 Final icons/screenshots/demo per Marketplace requirements (depends on OQ-7). E5 Marketplace submission checklist + final UUID/author domain (OQ-6).
 
 ### Verification responsibilities
 
@@ -327,7 +333,7 @@ Pure logic (mapping resolution, causal classification, parent precedence, guard 
 
 | Item | Detail |
 |---|---|
-| GitHub | `deck_sync_plugin` (set org/visibility before release) |
+| GitHub | `johnmschoonover/elgato_deck_sync_plugin` (set visibility before release) |
 | SDK docs | docs.elgato.com/streamdeck/sdk |
 | SDK version | 2.1.0 (`@elgato/streamdeck`) |
 | Node.js | v24 (manifest `Nodejs.Version`) |
@@ -336,4 +342,4 @@ Pure logic (mapping resolution, causal classification, parent precedence, guard 
 | Key events | `onWillAppear` / `onWillDisappear` — fire on navigating to another page/profile/folder, and on startup for front-page actions |
 | Loop prevention | Causal send/receive with in-flight echo tagging (§6.3) |
 | PI comms | `streamDeck.ui.sendToPropertyInspector(payload)` / `onSendToPlugin`; global settings API for scopes/roles/mapping |
-| Manifest | `Actions[].VisibleInActionsList`, `Profiles[]` (bundled profile registration) |
+| Manifest | `Profiles[]` (bundled profile registration, added at D2); `Actions[].VisibleInActionsList` left at its default per OQ-3 |

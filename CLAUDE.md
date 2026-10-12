@@ -36,12 +36,14 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 │   ├── piBridge.ts / piProtocol.ts          # plugin side of the Property Inspector protocol
 │   ├── log.ts                               # logger contract
 │   ├── actions/page-anchor.ts               # the Page Anchor action (SDK event → engine input)
-│   └── tests/                               # Jest: settings, mapping, engine, PI bridge, anchor adapter, assets
+│   ├── ids.ts                               # plugin/action UUIDs, checked against the manifest by a test
+│   └── tests/                               # Jest: settings, mapping, engine, PI bridge, anchor adapter, profiles, assets
 └── com.johnmschoonover.decksync.sdPlugin/   # the plugin package
     ├── manifest.json
     ├── imgs/                                # placeholder icons (final art: Epic E4)
     ├── ui/anchor.html                       # marker settings + Deck Sync setup (global config) UI
-    ├── profiles/                            # bundled per-device profiles — empty until D1 (docs/PROFILES.md)
+    ├── profiles/                            # NOT PRESENT YET — created when D1's exported profiles land (docs/PROFILES.md)
+    ├── logs/                                # plugin log files at runtime (gitignored)
     └── bin/                                 # build output (gitignored)
 ```
 
@@ -52,7 +54,8 @@ npm ci                 # done automatically by the SessionStart hook in cloud se
 npm run typecheck      # tsc --noEmit (strict)
 npm run build          # rollup -c → com.johnmschoonover.decksync.sdPlugin/bin/plugin.js
 npm run validate       # streamdeck validate (official manifest + asset validator)
-npm test               # jest
+npm test               # jest (coverage thresholds enforced)
+npm run icons          # regenerate placeholder icons (scripts/make-placeholder-icons.mjs)
 ```
 
 CI runs the same four commands on every push/PR to `main`. Run them all before pushing.
@@ -63,12 +66,12 @@ CI runs the same four commands on every push/PR to `main`. Run them all before p
 
 ## Known issues / current state (October 2026)
 
-Build, typecheck, validate and tests are green; every [agent] item in Epics A–C, B4 and E1–E3 is implemented (details in PRD §8). Open items:
+Build, typecheck, validate and tests are green; every [agent] item in Epics A–C and E1–E3 is implemented (details in PRD §8). D2 (manifest `Profiles` wiring) waits on D1's exported files. Open items:
 
-1. **No bundled profiles (D1, [gate]).** `profiles/` is empty; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
+1. **No bundled profiles (D1, [gate]).** There is no `profiles/` directory; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
 3. **Decisions to ratify** (PRD §8.6): parent↔child-only overrides, `pageCount`, no settle window, stale-switch handling, no Stream Deck + profile.
-4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6.
+4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).
 
 ## Conventions
 
@@ -77,7 +80,8 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **Profiles** must be bundled with the plugin and registered in `manifest.json` → `Profiles`; the SDK cannot switch to user-created profiles. Creating valid `.streamDeckProfile` bundles is a hardware task.
 - **No on-disk profile editing.** Communicate only via the official WebSocket API.
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
-- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts` import nothing from `@elgato/*` (type-only imports aside); the SDK is injected in `plugin.ts`. Keep it that way so every rule stays unit-testable. Time may only be used for garbage collection, never to classify an appear.
+- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime (type-only imports of `JsonObject`/`JsonValue` from `@elgato/utils`, a transitive dependency of the SDK, are erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace), never to classify an appear.
+- **Logs** land in `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored); line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.
 
 ## Workflow

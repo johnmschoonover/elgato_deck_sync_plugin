@@ -246,3 +246,19 @@ describe("reply routing (R11-F9)", () => {
     expect(log.debug).not.toHaveBeenCalledWith(expect.stringMatching(/^PI: 'getDevices' came from/));
   });
 });
+
+describe("the panel's read is bounded (R13-F8)", () => {
+  beforeEach(() => { mockState.sent = []; log.warn.mockClear(); });
+  afterEach(() => { jest.useRealTimers(); });
+  test("a read the app never answers is given up after 15 s with a warning and no reply", async () => {
+    jest.useFakeTimers();
+    const original = (await import("@elgato/streamdeck")).default.settings.getGlobalSettings as jest.Mock;
+    original.mockImplementationOnce(() => new Promise(() => {}));
+    registerPropertyInspectorBridge({ log, onSettingsSaved });
+    const handled = message({ event: "getGlobalSettings" });
+    await jest.advanceTimersByTimeAsync(15_000);
+    await handled;
+    expect(mockState.sent).toEqual([]);
+    expect(log.warn).toHaveBeenCalledWith("Settings: no reply from Stream Deck within 15000ms to the panel's read; not answered (the panel retries)");
+  });
+});

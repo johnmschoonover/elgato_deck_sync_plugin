@@ -69,6 +69,9 @@ export function createGlobalSettingsHandler(log: Log, engine: SettingsConsumer, 
   };
 }
 
+/** How long a panel's settings read may wait for the app before the request is given up. */
+export const PI_READ_TIMEOUT_MS = 15_000;
+
 export type PiBridgeOptions = {
   log: Log;
   /** Called with validated settings after a successful save from the PI. */
@@ -108,8 +111,17 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
         await send({ event: "devices", devices: listDevices() });
         break;
       case "getGlobalSettings": {
-        const { settings, issues } = await loadGlobalSettings(log, true); // the PI shows the issues; the event handler logs them
-        await send({ event: "globalSettings", settings, issues });
+        // The SDK's read waits for the app with no limit of its own; a lost reply must not leave this
+        // handler hanging (the panel retries on its own and reports the silence itself).
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), PI_READ_TIMEOUT_MS); });
+        const loaded = await Promise.race([loadGlobalSettings(log, true), timeout]); // the PI shows the issues; the event handler logs them
+        clearTimeout(timer);
+        if (!loaded) {
+          log.warn(`Settings: no reply from Stream Deck within ${PI_READ_TIMEOUT_MS}ms to the panel's read; not answered (the panel retries)`);
+          break;
+        }
+        await send({ event: "globalSettings", settings: loaded.settings, issues: loaded.issues });
         break;
       }
       case "setGlobalSettings": {

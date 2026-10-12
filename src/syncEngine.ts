@@ -185,6 +185,12 @@ type DeviceState = {
   overturnRun: number;
   /** The page a disappear just took the device off; an appear for it with nothing between is a re-emit, not a landing. */
   leftPage: number | null;
+  /** The seq of the last switch that landed on the device: a switch issued before it that never showed was passed by, not overturned. */
+  lastReceiveSeq: number;
+  /** A send that looked clean except for the old page still on the visit (appears reported first): the single-index disappear that follows confirms it. */
+  cleanPending: boolean;
+  /** A send from a visit a switch landed on, before the old page left: a second anchor on that page, or the person's flip after the landing (appears first) — the disappear group tells. */
+  drivenPending: boolean;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -262,6 +268,7 @@ export class SyncEngine {
       this.queued = [];
     }
     this.started = true;
+    for (const dev of this.devices.values()) dev.leftPage = null; // the pre-start history was replayed as navigation; nothing of it is a re-emit
   }
 
   /** Validated settings from the PI or the global-settings event. */
@@ -325,6 +332,7 @@ export class SyncEngine {
     dev.leaving.clear();
     dev.drivenRun = 0;
     dev.overturnRun = 0;
+    dev.cleanPending = dev.drivenPending = false;
     dev.lastReceivePage = null;
     dev.leftPage = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
@@ -391,6 +399,7 @@ export class SyncEngine {
       this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=left-page (the device left the page before the switch showed; kept as an echo tag for ${this.grace}ms)`);
     });
     if (left) this.dedupeTags(dev);
+    if (dev.lastReceivePage === page) dev.lastReceivePage = null; // the visit a switch landed on is over
     // Only when the engine still believes the device is there, so appear(new)/disappear(old) order does not matter.
     if (dev.lastKnownPage === page) {
       dev.lastKnownPage = null;
@@ -425,6 +434,7 @@ export class SyncEngine {
     dev.lastReceivePage = null;
     dev.disabledOnly = false;
     dev.overturnRun = 0;
+    dev.cleanPending = dev.drivenPending = false;
     dev.leftPage = null;
     this.warnedNoPage.delete(ev.actionId); // an index cleared (or set) later is worth a fresh warning
     if (ev.pageIndex === undefined) {
@@ -478,14 +488,32 @@ export class SyncEngine {
     // page change and ends any run of conflicts.
     const conflict = [...dev.visit].some((p) => p !== page);
     if (dev.leaving.size === 1) dev.drivenRun = 0;
+    // The disappear group that closed the previous visit settles what that visit's send was (rule 10b):
+    // one index left alone — a real page change, so a send that only looked driven because the old
+    // page was still on the visit (appears reported first) was clean; two left together — a page
+    // with two anchors reached by a switch, so its second anchor's send was driven.
+    if (dev.leaving.size > 0) {
+      if (dev.leaving.size === 1 && (dev.cleanPending || dev.drivenPending)) dev.overturnRun = 0;
+      if (dev.leaving.size === 2 && dev.drivenPending) {
+        dev.overturnRun++;
+        this.log.debug(`OVERTURN dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (a second index on a page a switch landed on; ${dev.overturnRun}/${this.drivenMax})`);
+      }
+      dev.cleanPending = dev.drivenPending = false;
+    }
     dev.leaving.clear();
     dev.visit.add(page);
     // The page a disappear just took the device off, reported again with nothing between: the app
     // re-emitting the anchors of a page a device already shows on a switch to it (hardware risk 2),
     // or a return from a page without an anchor. Either way the device never changed page, so this
-    // is not the landing of a switch queued behind another.
-    const reemit = dev.leftPage === page;
+    // is not the landing of a switch queued behind another. (Before start nothing is in flight and
+    // the queue keeps every navigation, so the shortcut would only drop a flip back to the page a
+    // trailing disappear just reported: it waits for start.)
+    const reemit = this.started && dev.leftPage === page;
     dev.leftPage = null;
+    // A switch landed on this visit and its page has not been left: a further index reported now is
+    // a second anchor on that page — or, if the app reports appears first, the person's flip after
+    // the landing (rule 10b tells them apart by the disappear group that follows).
+    const landedThisVisit = dev.lastReceivePage;
 
     // 3. The device is already known to be on this page: a second anchor on the page or a re-emit.
     //    (A page recorded by a disabled anchor only may still be sent once by an enabled one. A
@@ -507,7 +535,7 @@ export class SyncEngine {
     if (entry) {
       this.arm(dev, page);
       dev.lastReceivePage = page;
-      dev.overturnRun = 0; // a switch showed: whatever overturned the earlier ones, this device still lands them
+      dev.lastReceiveSeq = Math.max(dev.lastReceiveSeq, entry.seq);
       return this.receive(dev, page, entry);
     }
     dev.lastReceivePage = null;
@@ -596,29 +624,38 @@ export class SyncEngine {
       this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=conflicting-anchors — ${dev.drivenRun} conflicts in a row (pages reporting two page indices); a Page Anchor on this device's pages carries the wrong page index (fix the anchor's page index). Sends resume after a page with a single anchor`);
       return ignored("conflicting-anchors");
     }
-    // 10b. Overturned-switch breaker: the other face of a wrong page index. A send made while a
-    //      switch from another deck to a *different* page of this device has not shown (in flight,
-    //      or expired without an appear) overturns that switch. People do that — a flip while a
-    //      slow switch is landing — but the switch then lands, and the landing ends the run. A page
-    //      whose only anchor reports the wrong index overturns every switch to it and never lands
-    //      anything; two such pages on two decks drive each other forever when the app re-emits the
-    //      anchors of a page a device already shows (hardware risk 2), every page reporting a
-    //      single index, out of the conflict breaker's sight. A run of overturning sends with no
-    //      landing between is cut off the same way; a send with nothing outstanding ends the run.
-    //      Children only: every such cycle has at least one child sending in turn, and cutting that
-    //      child off breaks it, whereas a parent's change is never suppressed (PRD §6.3.3) — not even
-    //      after a child's coalesced burst left tags on the parent that no landing will ever clear.
+    // 10b. Driven-send breaker (children only). A send is *driven* when it follows from a switch
+    //      rather than from a person: made while a switch from another deck to a *different* page of
+    //      this device has not shown (in flight, or expired without an appear — the switch that moved
+    //      the deck here, reported under a wrong index), or made from a visit a switch landed on (a
+    //      second anchor on that page). People make driven sends too — a flip while a slow switch is
+    //      landing — but a person soon makes a *clean* one: nothing outstanding, no landing on the
+    //      visit, the only index on it. A cycle never does: every send in a loop with no human is
+    //      driven, so a run of driven sends with no clean send between is cut off, and a landing
+    //      never lifts the cut-off (the loop's own landings would). Wrong page indices that keep a
+    //      cycle alive — one per child across three children, pages cross-labelled across two — all
+    //      report a single index per page, out of the conflict breaker's sight. Children only: every
+    //      such cycle has at least one child sending in turn, and cutting that child off breaks it,
+    //      whereas a parent's change is never suppressed (PRD §6.3.3) — not even after a child's
+    //      coalesced burst left tags on the parent that no landing will ever clear.
     if (member.role === "child") {
-      const overturned = dev.pending.find((p) => p.originId !== dev.id && p.page !== page && (inFlight(p) || p.expired === "ttl"));
+      // (A switch issued before the device's last landing that never showed was passed by — coalesced, or a
+      // loop's leftover once the breaker cut it — not overturned by this send; the landing proved the deck responsive.)
+      const overturned = dev.pending.find((p) => p.originId !== dev.id && p.page !== page && p.seq > dev.lastReceiveSeq && (inFlight(p) || p.expired === "ttl"));
       if (overturned) {
         dev.overturnRun++;
         this.log.debug(`OVERTURN dev=${dev.id} page=${page} outstanding=[page=${overturned.page} seq=${overturned.seq} origin=${overturned.originId}] action=${ev.actionId} (a send while another deck's switch to this device has not shown; ${dev.overturnRun}/${this.drivenMax})`);
+      } else if (landedThisVisit !== null) {
+        dev.drivenPending = true; // settled by the disappear group that follows
+        this.log.debug(`OVERTURN? dev=${dev.id} page=${page} landed=${landedThisVisit} action=${ev.actionId} (a further index on a page a switch landed on — or the person's flip after it; the next disappear tells)`);
+      } else if (!conflict) {
+        dev.overturnRun = 0; // a clean flip: the person's own
       } else {
-        dev.overturnRun = 0;
+        dev.cleanPending = true; // clean unless the old page leaves together with this index
       }
       if (dev.overturnRun > this.drivenMax) {
         this.recordHuman(dev, page);
-        this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=overturned-switches — ${dev.overturnRun} sends in a row while a switch from another deck to this device never showed; a page on this device reports the wrong page index, or has no Page Anchor (fix the anchor). Sends resume once a switch lands here, or after a flip made with nothing outstanding`);
+        this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=overturned-switches — ${dev.overturnRun} sends in a row that followed from a switch (made while another deck's switch to this device had not shown, or from a page a switch landed on); a page on this device or on a deck it drives reports the wrong page index, or has no Page Anchor (fix the anchor). Sends resume after a flip made with nothing outstanding on a page the deck was not switched to`);
         return ignored("overturned-switches");
       }
     }
@@ -722,6 +759,7 @@ export class SyncEngine {
           if (member.role === "parent" && carrier && carrier.originRole !== "parent") {
             carrier.originRole = "parent";
             carrier.originId = dev.id;
+            if (carrier.expired === "detached") carrier.expired = false; // the parent vouches for it now: expected again, so it suppresses the child
           }
           skipped.push({ deviceId: target.deviceId, reason: "already-there" });
           continue;
@@ -892,7 +930,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0, leftPage: null };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0, leftPage: null, lastReceiveSeq: 0, cleanPending: false, drivenPending: false };
       this.devices.set(id, dev);
     }
     return dev;

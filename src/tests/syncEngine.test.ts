@@ -693,13 +693,13 @@ describe("review findings", () => {
       await flip("P", 1); // one human flip
       await drain();
       expect(h.sw.calls.length).toBeLessThan(threeDecks ? 100 : 60); // the decks come to rest
-      const trips = h.log.find("warn", /reason=conflicting-anchors/);
+      const trips = h.log.find("warn", /reason=(conflicting-anchors|overturned-switches)/);
       // With the copy reporting first on this rig, parent precedence suppresses the child's copied anchor while the
       // parent's switch is still expected, so the cycle never starts — unless the switch took longer than the TTL.
       const cycleRuns = !copyFirst || hopMs > 3000;
       if (cycleRuns) {
-        expect(trips.length).toBeGreaterThan(0);
-        expect(trips[0].msg).toMatch(/conflicts in a row \(pages reporting two page indices\).*a Page Anchor on this device's pages carries the wrong page index/);
+        expect(trips.length).toBeGreaterThan(0); // one breaker or the other cuts it: a two-anchor page is a conflict, and reached by a switch its send is driven
+        expect(trips[0].msg).toMatch(/reason=conflicting-anchors — \d+ conflicts in a row \(pages reporting two page indices\)|reason=overturned-switches — \d+ sends in a row that followed from a switch/);
       } else {
         expect(h.sw.calls.length).toBe(threeDecks ? 2 : 1);
         expect(trips).toHaveLength(0);
@@ -1105,13 +1105,14 @@ describe("review findings", () => {
       expect(loop.h.log.find("info", /^SEND dev=P /)).toHaveLength(0); // the parent only ever lands
       expect(loop.h.state("P").overturnRun).toBe(0);
       expect(loop.h.state(tripped).overturnRun).toBeGreaterThan(12);
-      // A landing on the cut-off deck ends its run; a flip to a correctly anchored page then syncs again.
+      // A landing never lifts the cut-off; the person's own clean flip (to a correctly anchored page) does.
       await loop.show("P", 0);
       await loop.drain();
-      expect(loop.h.state(tripped).overturnRun).toBe(0);
+      expect(loop.h.state(tripped).overturnRun).toBeGreaterThan(12);
       const before = loop.h.sw.calls.length;
-      await loop.show(tripped, 1 + (tripped === "C2" ? 2 : 0)); // one of its mislabelled pages: still the person's flip, sent
+      await loop.show(tripped, tripped === "C1" ? 3 : 1);
       expect(loop.h.sw.calls.length).toBeGreaterThan(before);
+      expect(loop.h.state(tripped).overturnRun).toBe(0);
       expect(loop.h.log.find("warn", /reason=overturned-switches/)).toHaveLength(loop.trips.length);
     }
   });
@@ -1246,9 +1247,13 @@ describe("review findings", () => {
     await k.nav("C2", 3); // lands the last; the first two are tags (cap, ttl) — only the ttl one counts
     expect(k.state("C2").pending.map((p) => [p.page, p.expired])).toEqual([[1, "cap"], [2, "ttl"]]);
     expect(await k.cls(k.nav("C2", 4))).toBe("SEND");
-    expect(k.state("C2").overturnRun).toBe(1); // the ttl tag for 2 counts …
+    expect(k.state("C2").overturnRun).toBe(0); // neither counts: both were passed by before the landing on 3
+    await k.nav("P", 0); // C2#0 (seq 5), issued after that landing …
+    k.clock.advance(3500); // … and never shown
+    expect(await k.cls(k.nav("C2", 3))).toBe("SEND");
+    expect(k.state("C2").overturnRun).toBe(1); // a ttl tag issued after the last landing does count
     k.clock.advance(30_000);
-    expect(await k.cls(k.nav("C2", 3))).toBe("SEND"); // … the capped tag alone does not
+    expect(await k.cls(k.nav("C2", 4))).toBe("SEND");
     expect(k.state("C2").pending.map((p) => [p.page, p.expired])).toEqual([]);
     expect(k.state("C2").overturnRun).toBe(0);
     for (const x of [h, g, k]) expect(x.log.find("warn", /overturned-switches/)).toHaveLength(0);
@@ -1283,6 +1288,155 @@ describe("review findings", () => {
     for (let i = 0; i < 51; i++) await c.nav("P", 1 + (i % 2)); // C2 never lands any of them
     expect(c.log.find("warn", /^GC dev=C2 page=\d seq=\d+ reason=cap — more than 50 switches/)).toHaveLength(1);
     expect(c.log.find("info", /^START .*ttlMs=3000 graceMs=30000 /)).toHaveLength(1);
+  });
+
+  test("R13-F1 one wrong-index anchor per child across three children drives the scope without a human: the loop's own landings never reset the breaker, and a child is cut off", async () => {
+    const run = async (hopMs: number) => {
+      const members: Scope["members"] = [{ deviceId: "P", role: "parent", profile: "profiles/plus" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }, { deviceId: "C3", role: "child" }];
+      const h = harness(deskScope({ members, mapping: { mode: "positional", overrides: [] } }));
+      h.devices.set("C3", 2);
+      await h.boot(["P", "C1", "C2", "C3"]);
+      // C1's page 3 says 1, C2's page 1 says 2, C3's page 2 says 3; everything else is right.
+      const wrong: Record<string, Record<number, number>> = { C1: { 3: 1 }, C2: { 1: 2 }, C3: { 2: 3 } };
+      const says = (dev: string, physical: number) => wrong[dev]?.[physical] ?? physical;
+      const phys: Record<string, number> = { P: 0, C1: 0, C2: 0, C3: 0 };
+      const show = async (dev: string, physical: number) => {
+        if (phys[dev] === physical) return;
+        h.leave(dev, says(dev, phys[dev]));
+        phys[dev] = physical;
+        await h.appear(dev, says(dev, physical));
+      };
+      let applied = 0;
+      const drain = async () => {
+        for (let hops = 0; applied < h.sw.calls.length && hops < 600; hops++) {
+          const c = h.sw.calls[applied++];
+          h.clock.advance(hopMs);
+          await show(c.deviceId, c.page);
+        }
+        expect(applied).toBe(h.sw.calls.length); // the cycle came to rest
+      };
+      await show("C1", 3); // the person flips C1 to its page 3, which reports 1
+      await drain();
+      return { h, show, drain, switches: h.sw.calls.length, trips: h.log.find("warn", /reason=overturned-switches/) };
+    };
+    for (const hopMs of [200, 3500]) {
+      const loop = await run(hopMs);
+      expect(loop.trips.length).toBeGreaterThanOrEqual(1);
+      expect(loop.switches).toBeLessThan(200); // not the 600-hop cap
+      const tripped = loop.trips[0].msg.match(/dev=(\w+)/)![1];
+      expect(["C1", "C2", "C3"]).toContain(tripped);
+      expect(loop.h.log.find("info", /^SEND dev=P /)).toHaveLength(0); // the parent only ever lands
+      expect(loop.h.state(tripped).overturnRun).toBeGreaterThan(12);
+      // A landing never lifts the cut-off; the person's own clean flip does.
+      await loop.show("P", 4);
+      await loop.drain();
+      expect(loop.h.state(tripped).overturnRun).toBeGreaterThan(12);
+      const before = loop.h.sw.calls.length;
+      await loop.show(tripped, 0); // a correctly anchored page, with nothing outstanding and nothing landed on this visit
+      expect(loop.h.sw.calls.length).toBeGreaterThan(before);
+      expect(loop.h.state(tripped).overturnRun).toBe(0);
+    }
+  });
+
+  test("R13-F1 with appears reported first, a person's flips after landings never accumulate: the single-index disappear that follows confirms each flip clean", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    for (let i = 0; i < 20; i++) {
+      const to = 1 + (i % 3);
+      await h.navAppearFirst("P", to); // C1#to
+      expect(await h.cls(h.navAppearFirst("C1", to))).toBe("RECEIVE");
+      await h.navAppearFirst("C2", to);
+      expect(await h.cls(h.navAppearFirst("C1", 4))).toBe("SEND"); // the person flips C1 right after the landing, old page still on the visit
+      await h.navAppearFirst("P", 4);
+      await h.navAppearFirst("C2", 4);
+    }
+    expect(h.state("C1").overturnRun).toBeLessThanOrEqual(1);
+    expect(h.log.find("warn", /overturned-switches/)).toHaveLength(0);
+    // A page with two anchors reached by a switch is the driven case the deferral exists for.
+    const g = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await g.boot();
+    await g.nav("P", 2); // C1#2
+    expect(await g.cls(g.appear("C1", 2))).toBe("RECEIVE");
+    expect(await g.cls(g.appear("C1", 5, { actionId: "C1-stray-on-2" }))).toBe("SEND"); // the page's second anchor, saying 5
+    expect(g.state("C1").overturnRun).toBe(0); // not yet settled
+    g.leave("C1", 2, { actionId: "C1-p2" });
+    g.leave("C1", 5, { actionId: "C1-stray-on-2" }); // both left together: it was a second anchor, not a flip
+    await g.nav("P", 3);
+    await g.appear("C1", 3);
+    expect(g.state("C1").overturnRun).toBe(1);
+    expect(g.log.find("debug", /^OVERTURN dev=C1 pages=\[2,5\] \(a second index on a page a switch landed on; 1\/12\)/)).toHaveLength(1);
+  });
+
+  test("R13-F2 before start, with appears reported first, a flip back to the page a trailing disappear just reported is a navigation, not a re-emit", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    for (const id of ["P", "C1", "C2"]) expect(await h.cls(h.appear(id, 0))).toBe("STARTUP");
+    expect((await h.navAppearFirst("P", 1)).reason).toBe("not-started");
+    expect((await h.navAppearFirst("P", 0)).reason).toBe("not-started"); // queued too
+    expect(h.log.find("debug", /reason=duplicate/)).toHaveLength(0);
+    await h.engine.start(h.settings);
+    expect(h.log.find("info", /^START .*queued=2$/)).toHaveLength(1);
+    expect(h.sw.calls.map((c) => `${c.deviceId}#${c.page}`)).toEqual(["C1#1", "C2#1", "C1#0", "C2#0"]);
+    expect(h.page("P")).toBe(0);
+    // After start the same shape is a re-emit (an anchorless excursion or the app re-reporting the page), as documented.
+    h.leave("P", 0);
+    expect((await h.appear("P", 0)).reason).toBe("duplicate");
+  });
+
+  test("R13-F3 a detached carrier the parent promotes is expected again: the child stays suppressed until it lands", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    h.engine.onDeviceDisconnected("P");
+    h.devices.set("P", 7, false);
+    await h.nav("C2", 3); // C1#3 (child origin); P skipped as disconnected
+    h.engine.onSettingsChanged(settingsWith(deskScope({ mapping: { mode: "positional", overrides: [] }, members: [{ deviceId: "P", role: "parent", profile: "profiles/plus" }, { deviceId: "C1", role: "child" }] }))); // C2 leaves the scope: its switch is detached
+    expect(h.state("C1").pending.map((p) => [p.page, p.expired, p.originId])).toEqual([[3, "detached", "C2"]]);
+    h.devices.set("P", 7, true);
+    h.engine.onDeviceConnected("P");
+    expect(await h.cls(h.appear("P", 0))).toBe("STARTUP");
+    expect(await h.nav("P", 3)).toMatchObject({ classification: "SEND", skipped: [{ deviceId: "C1", reason: "already-there" }] });
+    expect(h.state("C1").pending.map((p) => [p.page, p.expired, p.originId, p.originRole])).toEqual([[3, false, "P", "parent"]]); // promoted and re-attached
+    expect(await h.cls(h.nav("C1", 2))).toBe("SUPPRESSED"); // the parent's choice stands
+    h.physical.C1 = 0;
+    expect(await h.nav("C1", 3)).toMatchObject({ classification: "RECEIVE", seq: 1 });
+    expect([h.page("P"), h.page("C1")]).toEqual([3, 3]);
+  });
+
+  test("R13-F12 a disconnect forgets the page the device was leaving: its reconnect appear on that page is STARTUP, and its next flip leads", async () => {
+    const h = harness();
+    await h.boot();
+    h.leave("C1", 0);
+    h.engine.onDeviceDisconnected("C1");
+    h.engine.onDeviceConnected("C1");
+    expect(await h.cls(h.appear("C1", 0))).toBe("STARTUP");
+    expect(h.state("C1").armed).toBe(true);
+    expect(await h.nav("C1", 3)).toMatchObject({ classification: "SEND", issued: [{ deviceId: "P", page: 3 }, { deviceId: "C2", page: 3 }] });
+  });
+
+  test("R13-F13 leaving the very page a late landing put the device on is not explained by that landing: the reissued switch to it is overtaken", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    await h.nav("P", 1); // C1#1 seq 1
+    await h.nav("P", 3); // C1#3 seq 2
+    h.clock.advance(3001); // both expire
+    await h.nav("P", 1); // C1#1 reissued, seq 3 (C1 is expected on 3? no: nothing honoured, lastKnownPage 0)
+    for (const pg of [1, 3, 1]) await h.nav("C2", pg);
+    expect(h.state("C1").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[1, 1, "ttl"], [3, 2, "ttl"], [1, 3, false]]);
+    expect(await h.nav("C1", 1)).toMatchObject({ classification: "RECEIVE", seq: 1, late: true }); // the old tag is the oldest switch to 1; the reissue stays expected
+    expect(await h.cls(h.nav("C1", 2))).toBe("SEND"); // leaving 1 at once overtakes the reissue: the landing just made explains nothing about leaving its own page
+    expect(h.state("C1").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[3, 2, "ttl"], [1, 3, "left"]]);
+  });
+
+  test("R13-F14 a disconnect forgets the indices on the device's visit: its first flip after the reconnect is no conflict", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }), { drivenSendMax: 0 });
+    await h.boot();
+    await h.nav("C1", 1);
+    expect((await h.appear("C1", 2, { actionId: "C1-stray-on-1" })).reason).toBe("conflicting-anchors"); // a second index on the visit trips a zero-tolerance breaker
+    h.engine.onDeviceDisconnected("C1");
+    h.engine.onDeviceConnected("C1");
+    expect(await h.cls(h.appear("C1", 0))).toBe("STARTUP");
+    expect(await h.cls(h.nav("C1", 3))).toBe("SEND");
+    expect(h.log.find("debug", /^CONFLICT dev=C1 page=3/)).toHaveLength(0);
+    expect(h.state("C1").drivenRun).toBe(0);
   });
 
   test("R11-F7 a dependency that throws inside an anchor edit is caught and logged, never thrown into the SDK", async () => {

@@ -192,8 +192,13 @@
             // A reply to a Save carries its id; one for a Save that a later Save replaced (or whose
             // watchdog-era twin arrives late) is ignored. A reply without an id is a plain load.
             const confirmed = payload.id !== undefined;
-            saved = payload.settings || { version: 2, scopes: [] }; // whatever the plugin confirms it now holds, this Save's or an earlier one's
-            if (confirmed && payload.id !== pendingSaveId) break;
+            if (confirmed && payload.id !== pendingSaveId) {
+              saved = payload.settings || { version: 2, scopes: [] }; // an earlier Save's confirmation: what the plugin holds now; this Save's verdict is still to come
+              break;
+            }
+            // A load answered after a Save (a retry the plugin's read answered late) predates what the panel saved.
+            if (!confirmed && saveSeq > 0) break;
+            saved = payload.settings || { version: 2, scopes: [] };
             let editedMeanwhile = false;
             let applied = confirmed; // a confirmation always reports its problems; a plain load only when it was adopted
             if (!loaded) {
@@ -213,7 +218,7 @@
               pendingSaveId = null;
               // Edits made while the plugin was saving stay in the draft, still unsaved. A Discard
               // made meanwhile (dirty is false) adopts the confirmed configuration instead.
-              editedMeanwhile = dirty && JSON.stringify(draft.scopes) !== pendingSave;
+              editedMeanwhile = (dirty && JSON.stringify(draft.scopes) !== pendingSave) || invalidText.size > 0; // (a value being typed, still invalid, is an edit too)
               if (!editedMeanwhile) {
                 draft = clone(saved);
                 dirty = false;
@@ -257,7 +262,8 @@
         $("enabled").checked = settings.enabled !== false;
       }
 
-      function saveMarker() {
+      /** Validates the page-index box; returns the parsed index (undefined when blank), or null when invalid. */
+      function readPageIndex() {
         const input = $("pageIndex");
         const raw = input.value.trim();
         const n = Number(raw);
@@ -266,8 +272,14 @@
         const valid = !bad && (raw === "" || (Number.isInteger(n) && n >= 0));
         input.setAttribute("aria-invalid", valid ? "false" : "true");
         markerEdited = true;
+        return valid ? (raw === "" ? undefined : n) : null;
+      }
+
+      function saveMarker() {
+        const index = readPageIndex();
+        const valid = index !== null;
         // An invalid page index is not saved, but the Enabled box still is (with the last valid index).
-        if (valid) lastValidPageIndex = raw === "" ? undefined : n;
+        if (valid) lastValidPageIndex = index;
         const payload = { enabled: $("enabled").checked };
         if (lastValidPageIndex !== undefined) payload.pageIndex = lastValidPageIndex;
         if (!send({ event: "setSettings", context: uuid, payload })) {
@@ -277,7 +289,13 @@
         if (!valid) setStatus("Page index must be a whole number, 0 or more. The page index was not saved; Enabled was.", "err");
         else if ($("status").textContent.startsWith("Page index")) setStatus("", "");
       }
-      $("pageIndex").addEventListener("input", saveMarker);
+      // Typing validates as it goes; the index is saved once the edit is finished (change: blur or
+      // Enter), so "12" never reaches the plugin as "1" — the engine would take that for the page shown.
+      $("pageIndex").addEventListener("input", () => {
+        if (readPageIndex() === null) setStatus("Page index must be a whole number, 0 or more. It is saved once it is.", "err");
+        else if ($("status").textContent.startsWith("Page index")) setStatus("", "");
+      });
+      $("pageIndex").addEventListener("change", saveMarker);
       $("enabled").addEventListener("change", saveMarker);
 
       function renderThisDevice() {
@@ -361,6 +379,9 @@
       function syncParentId(scope) {
         const p = scope.members.find((m) => m.role === "parent");
         scope.parentDeviceId = p ? p.deviceId : "";
+        // A pair is parent page ↔ child page whichever side it was built on: after a role swap the
+        // new parent may sit on the "b" side (the plugin accepts either; the panel shows "a" as the parent).
+        if (p) for (const o of scope.mapping.overrides) if (o.b.deviceId === p.deviceId && o.a.deviceId !== p.deviceId) { const a = o.a; o.a = o.b; o.b = a; }
       }
 
       /** Overrides that still pin a page of the current parent to a page of a current child. */
@@ -439,7 +460,9 @@
           }
         } finally {
           if (focused) {
-            const again = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+            const found = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+            // A control that is gone or disabled (Add scope after a disconnect) cannot take the focus: the next one that can does.
+            const again = found && !found.disabled ? found : $("setup").querySelector("[data-focus]:not(:disabled)");
             if (again) {
               if (typed) {
                 again.value = typed.value;
@@ -545,7 +568,7 @@
         const box = el("details", {
           class: "ds-scope", open: !collapsed.has(scope.id),
           ontoggle: (ev) => { if (ev.target.open) collapsed.delete(scope.id); else collapsed.add(scope.id); },
-        }, el("summary", { "data-scope-summary": scope.id }, summaryText));
+        }, el("summary", { "data-scope-summary": scope.id, "data-focus": `summary:${scope.id}` }, summaryText));
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
@@ -644,7 +667,7 @@
           setStatus("Saving… (the save already sent cannot be discarded)", "");
         } else {
           pendingSave = null; // a timed-out save, should it still be confirmed, is adopted as is too
-          setStatus("", "");
+          if (!disconnected) setStatus("", ""); // the disconnect message is the one that matters
         }
         renderSetup();
       });

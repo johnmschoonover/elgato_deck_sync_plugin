@@ -42,6 +42,8 @@ const body = /<body[^>]*>([\s\S]*?)<script>/.exec(html)![1];
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const status = () => $("status").textContent;
 const setInput = (el: HTMLInputElement, value: string) => { el.value = value; el.dispatchEvent(new Event("input")); };
+/** Types a value and finishes the edit (blur/Enter), as a person does with the marker's page index. */
+const commitInput = (el: HTMLInputElement, value: string) => { setInput(el, value); el.dispatchEvent(new Event("change")); };
 const select = (el: HTMLSelectElement, value: string) => { el.value = value; el.dispatchEvent(new Event("change")); };
 const byLabel = <T extends HTMLElement>(label: string) => document.querySelector(`[aria-label="${label}"]`) as T;
 const byFocus = <T extends HTMLElement>(key: string) => document.querySelector(`[data-focus="${key}"]`) as T;
@@ -162,11 +164,15 @@ describe("connect and load", () => {
 });
 
 describe("this marker", () => {
-  test("typing a page index saves it; blank clears it; the enabled box is saved too", () => {
+  test("a finished page-index edit saves it (typing alone does not, R13-F6); blank clears it; the enabled box is saved too", () => {
     const ws = loadedPanel();
-    setInput($("pageIndex"), "3");
+    setInput($("pageIndex"), "1"); // on the way to "12"
+    expect(ws.events("setSettings")).toHaveLength(0);
+    commitInput($("pageIndex"), "12");
+    expect(ws.events("setSettings")).toEqual([{ event: "setSettings", context: "pi-uuid", payload: { enabled: true, pageIndex: 12 } }]);
+    commitInput($("pageIndex"), "3");
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: true, pageIndex: 3 } });
-    setInput($("pageIndex"), "");
+    commitInput($("pageIndex"), "");
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: true } });
     $<HTMLInputElement>("enabled").checked = false;
     $("enabled").dispatchEvent(new Event("change"));
@@ -177,12 +183,15 @@ describe("this marker", () => {
     const ws = loadedPanel(SAVED, { pageIndex: 2, enabled: true });
     setInput($("pageIndex"), "-1");
     expect($("pageIndex").getAttribute("aria-invalid")).toBe("true");
+    expect(status()).toBe("Page index must be a whole number, 0 or more. It is saved once it is.");
+    expect(ws.events("setSettings")).toHaveLength(0); // nothing sent while typing
+    commitInput($("pageIndex"), "-1");
     expect(status()).toBe("Page index must be a whole number, 0 or more. The page index was not saved; Enabled was.");
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: true, pageIndex: 2 } }); // the last valid index
     $<HTMLInputElement>("enabled").checked = false;
     $("enabled").dispatchEvent(new Event("change"));
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: false, pageIndex: 2 } });
-    setInput($("pageIndex"), "4");
+    commitInput($("pageIndex"), "4");
     expect($("pageIndex").getAttribute("aria-invalid")).toBe("false");
     expect(status()).toBe("");
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: false, pageIndex: 4 } });
@@ -601,12 +610,71 @@ describe("setup: scopes, roles, overrides", () => {
     expect(fresh.open).toBe(true);
   });
 
-  test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
-    // Saved: P parent with an override. Swapping roles makes that override stale (hidden, dropped on Save).
-    const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };
+  test("R13-F4 a load answered after a Save never reverts the panel to what it held before the Save", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "New");
+    $("save").click();
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ ...SAVED.scopes[0], name: "New" }] }, issues: [], id: lastSaveId(ws) });
+    expect(status()).toBe("Saved.");
+    ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [] }); // the initial load's retry, answered late with the pre-save configuration
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("New");
+    $("discard").click();
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("New");
+  });
+
+  test("R13-F5 making the child the parent keeps an override across the swap, normalised so the parent's page comes first", () => {
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 4 } }] } }] };
     const ws = loadedPanel(saved);
     select(byLabel("Role of Deck C1 (disconnected)"), "parent");
-    expect($("setup").textContent).toContain("1 override(s) no longer involve the parent");
+    expect(document.querySelector(".ds-scope")!.textContent).not.toContain("no longer involve the parent");
+    expect(byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)").value).toBe("4"); // C1's page is the parent's page now
+    expect(byLabel<HTMLInputElement>("Child page (override 1 of scope-1)").value).toBe("2");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ parentDeviceId: string; mapping: { overrides: unknown[] } }> };
+    expect(sent.scopes[0].parentDeviceId).toBe("C1");
+    expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "C1", page: 4 }, b: { deviceId: "P", page: 2 } }]);
+  });
+
+  test("R13-F9 a confirmation that arrives while an invalid value is being typed keeps the text and its error", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "New");
+    $("save").click();
+    setInput(byLabel("Page count of Deck P"), "0"); // typing, still invalid, while the save is out
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ ...SAVED.scopes[0], name: "New" }] }, issues: [], id: lastSaveId(ws) });
+    expect(status()).toBe("Saved; you have further unsaved changes.");
+    const pages = byLabel<HTMLInputElement>("Page count of Deck P");
+    expect(pages.value).toBe("0");
+    expect(pages.getAttribute("aria-invalid")).toBe("true");
+  });
+
+  test("R13-F10 Discard after a disconnect keeps the disconnect message", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Edited");
+    ws.close();
+    $("discard").click();
+    expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1");
+  });
+
+  test("R13-F11 the keyboard focus survives a device push on a scope summary, and a removal after a disconnect lands on an enabled control", () => {
+    const ws = loadedPanel();
+    const summary = document.querySelector<HTMLElement>("details.ds-scope summary")!;
+    summary.setAttribute("tabindex", "0");
+    summary.focus();
+    expect(document.activeElement).toBe(summary);
+    ws.fromPlugin({ event: "devices", devices: [DEVICES[0], { ...DEVICES[1], isConnected: true }] }); // re-renders
+    expect(document.activeElement).toBe(document.querySelector("details.ds-scope summary"));
+    ws.close();
+    byLabel<HTMLButtonElement>("Remove scope Scope 1").click(); // its focus target, Add scope, is disabled now
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLButtonElement).disabled).toBeFalsy();
+  });
+
+  test("R6-F8/R13-F5 a rejected save leaves the override rows pointing at the right overrides across a role swap; an override with no parent left is kept for Discard", () => {
+    const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };
+    const ws = loadedPanel(saved);
+    select(byLabel("Role of Deck C1 (disconnected)"), "parent"); // the pair now reads C1:2 ↔ P:1
+    expect(byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)").value).toBe("2");
     byFocus<HTMLButtonElement>("addov:scope-1").click();
     byFocus<HTMLButtonElement>("addov:scope-1").click();
     setInput(byLabel("Parent page (override 2 of scope-1)"), "9"); // rows are numbered by their place in the draft
@@ -614,19 +682,35 @@ describe("setup: scopes, roles, overrides", () => {
     $("save").click();
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ parentDeviceId: string; mapping: { overrides: unknown[] } }> };
     expect(sent.scopes[0].parentDeviceId).toBe("C1");
-    expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "C1", page: 9 }, b: { deviceId: "P", page: 0 } }, { a: { deviceId: "C1", page: 0 }, b: { deviceId: "P", page: 3 } }]);
+    expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "C1", page: 2 }, b: { deviceId: "P", page: 1 } }, { a: { deviceId: "C1", page: 9 }, b: { deviceId: "P", page: 0 } }, { a: { deviceId: "C1", page: 0 }, b: { deviceId: "P", page: 3 } }]);
     ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }], id: lastSaveId(ws) });
     expect(status()).toContain("Not saved");
     byLabel<HTMLButtonElement>("Remove override 2 of scope-1").click(); // the page-9 row
     expect(byLabel<HTMLInputElement>("Child page (override 3 of scope-1)")).toBeNull();
-    expect(byLabel<HTMLInputElement>("Parent page (override 2 of scope-1)").value).toBe("0"); // the other live row survived, renumbered
+    expect(byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)").value).toBe("2"); // the swapped pair is still first
+    expect(byLabel<HTMLInputElement>("Parent page (override 2 of scope-1)").value).toBe("0"); // the other added row survived, renumbered
     expect(byLabel<HTMLInputElement>("Child page (override 2 of scope-1)").value).toBe("3");
-    expect($("setup").textContent).toContain("1 override(s) no longer involve the parent"); // the stale one is still kept for Discard
     $("discard").click();
     expect(byLabel<HTMLSelectElement>("Role of Deck P").value).toBe("parent");
-    expect(byLabel<HTMLInputElement>("Child page (override 1 of scope-1)").value).toBe("2"); // the original override is back
+    expect(byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)").value).toBe("1"); // back in the saved orientation
   });
 
+  test("R6-F8 a pair that no longer involves the parent (a third device took the role) is hidden, counted, dropped on Save and kept for Discard", () => {
+    const three = [...DEVICES, { id: "C2", name: "Deck C2", type: 2, isConnected: false }];
+    const ws = openPanel();
+    ws.fromPlugin({ event: "devices", devices: three });
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] }, issues: [] });
+    select(byLabel("Role of Deck C2 (disconnected)"), "parent"); // neither side of the pair is the parent now
+    expect($("setup").textContent).toContain("1 override(s) no longer involve the parent");
+    expect(byLabel("Parent page (override 1 of scope-1)")).toBeNull();
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ mapping: { overrides: unknown[] } }> };
+    expect(sent.scopes[0].mapping.overrides).toEqual([]);
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "x" }], id: lastSaveId(ws) });
+    $("discard").click();
+    expect(byLabel<HTMLSelectElement>("Role of Deck P").value).toBe("parent");
+    expect(byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)").value).toBe("1");
+  });
   test("R6-F15 the page-count and override-page validators flag bad values with their messages and block Save until fixed", () => {
     const ws = loadedPanel();
     setInput(byLabel("Page count of Deck P"), "0");

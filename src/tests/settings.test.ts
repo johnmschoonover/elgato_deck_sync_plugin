@@ -70,6 +70,25 @@ describe("validateGlobalSettings", () => {
     expect(result.issues[0].message).toBe("Scope 'desk' ignored: a scope needs exactly one parent; found 0.");
   });
 
+  test("an override given child-first is normalized to parent-first", () => {
+    const result = validateGlobalSettings(withScope({ mapping: { overrides: [{ a: { deviceId: "C1", page: 4 }, b: { deviceId: "P", page: 2 } }] } }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 4 } }]);
+  });
+
+  test("the same parent page may be pinned for different children; pageCount is kept", () => {
+    const result = validateGlobalSettings(withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 8 }, { deviceId: "C2", role: "child" }],
+      mapping: { overrides: [
+        { a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 7 } },
+        { a: { deviceId: "P", page: 2 }, b: { deviceId: "C2", page: 3 } },
+      ] },
+    }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].members[1]).toEqual({ deviceId: "C1", role: "child", pageCount: 8 });
+    expect(result.settings.scopes[0].mapping.overrides).toHaveLength(2);
+  });
+
   test("strips unknown fields and blank profiles", () => {
     const { settings } = validateGlobalSettings({
       version: 2,
@@ -103,10 +122,26 @@ describe("validateGlobalSettings", () => {
     ["override negative page", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: -1 }, b: { deviceId: "C1", page: 0 } }] } })],
     ["override fractional page", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 1.5 }, b: { deviceId: "C1", page: 0 } }] } })],
     ["override pairs a device with itself", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "P", page: 1 } }] } })],
-    ["same endpoint in two overrides", withScope({ mapping: { overrides: [
+    ["override between two children", withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }],
+      mapping: { overrides: [{ a: { deviceId: "C1", page: 0 }, b: { deviceId: "C2", page: 1 } }] },
+    })],
+    ["same parent page pinned twice for one child", withScope({ mapping: { overrides: [
       { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 1 } },
       { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 2 } },
     ] } })],
+    ["same child page pinned twice", withScope({ mapping: { overrides: [
+      { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 1 } },
+      { a: { deviceId: "P", page: 3 }, b: { deviceId: "C1", page: 1 } },
+    ] } })],
+    ["override page beyond the member's page count", withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 3 }],
+      mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 3 } }] },
+    })],
+    ["override page beyond the default page count", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 5 }, b: { deviceId: "C1", page: 0 } }] } })],
+    ["pageCount zero", withScope({ members: [{ deviceId: "P", role: "parent", pageCount: 0 }, { deviceId: "C1", role: "child" }] })],
+    ["pageCount fractional", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 2.5 }] })],
+    ["pageCount as a string", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: "5" }] })],
   ])("drops a scope with %s and reports it", (_, input) => {
     const result = validateGlobalSettings(input);
     expect(result.settings.scopes).toEqual([]);

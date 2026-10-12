@@ -13,16 +13,26 @@ export const GLOBAL_SETTINGS_VERSION = 2;
 
 export type DeviceRole = "parent" | "child";
 
+/** Top-level pages in a bundled profile when a member does not say (PRD §10 OQ-2). */
+export const DEFAULT_PAGE_COUNT = 5;
+
 export type ScopeMember = {
   deviceId: string;
   role: DeviceRole;
   /** Bundled profile name (manifest `Profiles[].Name`). Blank → default for the device type. */
   profile?: string;
+  /** Top-level pages in that profile; positional mapping stops at this bound. Default 5. */
+  pageCount?: number;
 };
 
 export type PageRef = { deviceId: string; page: number };
 
-/** A pinned page pair. Bidirectional: it holds whichever side initiates (PRD §6.4). */
+/**
+ * A pinned page pair, bidirectional: it holds whichever side initiates (PRD §6.4).
+ * Overrides always pair a parent page with a child page — the parent's page index is
+ * the scope's canonical coordinate, so child↔child mapping goes through it. After
+ * validation `a` is the parent endpoint and `b` the child endpoint.
+ */
 export type MappingOverride = { a: PageRef; b: PageRef };
 
 export type Scope = {
@@ -144,9 +154,13 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
     if (!isObject(m) || !isNonEmptyString(m.deviceId)) return fail(`member ${i} has no 'deviceId'.`);
     if (m.role !== "parent" && m.role !== "child") return fail(`member ${m.deviceId} has role ${JSON.stringify(m.role)}; expected 'parent' or 'child'.`);
     if (m.profile !== undefined && typeof m.profile !== "string") return fail(`member ${m.deviceId} has a non-string 'profile'.`);
+    if (m.pageCount !== undefined && !(typeof m.pageCount === "number" && Number.isInteger(m.pageCount) && m.pageCount >= 1)) {
+      return fail(`member ${m.deviceId} has an invalid 'pageCount' (${JSON.stringify(m.pageCount)}); expected an integer ≥ 1.`);
+    }
     if (members.some((x) => x.deviceId === m.deviceId)) return fail(`device ${m.deviceId} is listed twice.`);
     const member: ScopeMember = { deviceId: m.deviceId, role: m.role };
     if (isNonEmptyString(m.profile)) member.profile = m.profile.trim();
+    if (m.pageCount !== undefined) member.pageCount = m.pageCount;
     members.push(member);
   }
 
@@ -165,7 +179,8 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
     if (raw.mapping.mode !== undefined && raw.mapping.mode !== "positional") return fail(`unknown mapping mode ${JSON.stringify(raw.mapping.mode)}.`);
     if (raw.mapping.overrides !== undefined) {
       if (!Array.isArray(raw.mapping.overrides)) return fail("'mapping.overrides' must be an array.");
-      const endpoints = new Set<string>();
+      // Per child, each parent page and each child page may be pinned once.
+      const pinned = new Set<string>();
       for (const [i, o] of raw.mapping.overrides.entries()) {
         if (!isObject(o)) return fail(`override ${i} is not an object.`);
         const refs: PageRef[] = [];
@@ -177,14 +192,19 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
           if (!members.some((m) => m.deviceId === ref.deviceId)) return fail(`override ${i}.${side} refers to ${ref.deviceId}, which is not a member.`);
           refs.push({ deviceId: ref.deviceId, page: ref.page });
         }
-        const [a, b] = refs;
-        if (a.deviceId === b.deviceId) return fail(`override ${i} pairs device ${a.deviceId} with itself.`);
-        for (const r of refs) {
-          const key = `${r.deviceId}:${r.page}`;
-          if (endpoints.has(key)) return fail(`page ${r.page} of ${r.deviceId} appears in more than one override.`);
-          endpoints.add(key);
+        const [first, second] = refs;
+        if (first.deviceId === second.deviceId) return fail(`override ${i} pairs device ${first.deviceId} with itself.`);
+        const parentRef = first.deviceId === parentDeviceId ? first : second.deviceId === parentDeviceId ? second : undefined;
+        if (!parentRef) return fail(`override ${i} must pair a page of the parent (${parentDeviceId}) with a page of a child.`);
+        const childRef = parentRef === first ? second : first;
+        for (const [ref, label] of [[parentRef, "parent"], [childRef, "child"]] as const) {
+          const count = members.find((m) => m.deviceId === ref.deviceId)!.pageCount ?? DEFAULT_PAGE_COUNT;
+          if (ref.page >= count) return fail(`override ${i}: page ${ref.page} of ${ref.deviceId} is beyond its ${count} pages.`);
+          const key = `${childRef.deviceId}:${label}:${ref.page}`;
+          if (pinned.has(key)) return fail(`override ${i}: ${label} page ${ref.page} is already pinned for child ${childRef.deviceId}.`);
+          pinned.add(key);
         }
-        overrides.push({ a, b });
+        overrides.push({ a: parentRef, b: childRef });
       }
     }
   }

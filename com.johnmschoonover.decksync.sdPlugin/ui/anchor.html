@@ -476,14 +476,14 @@
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
           el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
-          el("button", { class: "ds-fixed", "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
+          el("button", { class: "ds-fixed", "aria-label": `Remove scope ${scope.name || scope.id}`, "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
 
         if (parent && children.length) {
           box.append(el("div", { class: "ds-muted" }, "Overrides pin a parent page to a child page (both directions); other pages map positionally."));
           const stale = scope.mapping.overrides.length - validOverrides(scope).length;
           if (stale) box.append(el("div", { class: "ds-muted" }, `${stale} override(s) no longer involve the parent and will be dropped on Save (Discard changes restores them).`));
           scope.mapping.overrides.forEach((o, i) => { if (validOverrides(scope).includes(o)) box.append(renderOverride(scope, parent, children, o, i)); });
-          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", "data-focus": `addov:${scope.id}`, onclick: change(() => {
+          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", "aria-label": `Add override to ${scope.name || scope.id}`, "data-focus": `addov:${scope.id}`, onclick: change(() => {
             scope.mapping.overrides.push({ a: { deviceId: parent.deviceId, page: 0 }, b: { deviceId: children[0].deviceId, page: 0 } });
           }) }, "Add override")));
         } else {
@@ -507,7 +507,7 @@
           el("select", { "aria-label": `Child device (${row})`, "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
             ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
           el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page", "b"),
-          el("button", { class: "ds-fixed", "aria-label": `Remove ${row}`, "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); focusNext = `addov:${scope.id}`; }) }, "×"));
+          el("button", { class: "ds-fixed", "aria-label": `Remove ${row}`, "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(scope.mapping.overrides.indexOf(o), 1); focusNext = `addov:${scope.id}`; }) }, "×"));
       }
 
       /* ---------------- save / discard ---------------- */
@@ -527,11 +527,13 @@
           draft.scopes = draft.scopes.filter((s) => s.members.length > 0);
           renderSetup();
         }
-        for (const s of draft.scopes) {
+        // The payload is built from a copy: overrides are parent-relative and stay in the draft
+        // (so role changes round-trip), and the rendered rows keep pointing at the same objects.
+        const scopes = draft.scopes.map((s) => {
           syncParentId(s);
-          s.mapping.overrides = validOverrides(s); // overrides are parent-relative; kept in the draft until now so role changes round-trip
-        }
-        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } })) {
+          return { ...s, mapping: { mode: "positional", overrides: validOverrides(s) } };
+        });
+        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes } })) {
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;
         }

@@ -299,6 +299,59 @@ describe("setup: scopes, roles, overrides", () => {
       .toEqual([{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 3 } }]);
   });
 
+  test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
+    // Saved: P parent with an override. Swapping roles makes that override stale (hidden, dropped on Save).
+    const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };
+    const ws = loadedPanel(saved);
+    select(byLabel("Role of Deck C1 (disconnected)"), "parent");
+    expect($("setup").textContent).toContain("1 override(s) no longer involve the parent");
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Parent page (override 2 of scope-1)"), "9"); // rows are numbered by their place in the draft
+    setInput(byLabel("Child page (override 3 of scope-1)"), "3");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ parentDeviceId: string; mapping: { overrides: unknown[] } }> };
+    expect(sent.scopes[0].parentDeviceId).toBe("C1");
+    expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "C1", page: 9 }, b: { deviceId: "P", page: 0 } }, { a: { deviceId: "C1", page: 0 }, b: { deviceId: "P", page: 3 } }]);
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }] });
+    expect(status()).toContain("Not saved");
+    byLabel<HTMLButtonElement>("Remove override 2 of scope-1").click(); // the page-9 row
+    expect(byLabel<HTMLInputElement>("Child page (override 3 of scope-1)")).toBeNull();
+    expect(byLabel<HTMLInputElement>("Parent page (override 2 of scope-1)").value).toBe("0"); // the other live row survived, renumbered
+    expect(byLabel<HTMLInputElement>("Child page (override 2 of scope-1)").value).toBe("3");
+    expect($("setup").textContent).toContain("1 override(s) no longer involve the parent"); // the stale one is still kept for Discard
+    $("discard").click();
+    expect(byLabel<HTMLSelectElement>("Role of Deck P").value).toBe("parent");
+    expect(byLabel<HTMLInputElement>("Child page (override 1 of scope-1)").value).toBe("2"); // the original override is back
+  });
+
+  test("R6-F15 the page-count and override-page validators flag bad values with their messages and block Save until fixed", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Page count of Deck P"), "0");
+    expect(byLabel("Page count of Deck P").getAttribute("aria-invalid")).toBe("true");
+    expect(status()).toBe("Pages must be a whole number, 1 or more.");
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+    setInput(byLabel("Page count of Deck P"), "8");
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Child page (override 1 of scope-1)"), "-1");
+    expect(status()).toBe("Child page (override 1 of scope-1) must be a whole number, 0 or more.");
+    $("save").click();
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+    setInput(byLabel("Child page (override 1 of scope-1)"), "2");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ members: Array<{ pageCount?: number }>; mapping: { overrides: unknown[] } }> };
+    expect(sent.scopes[0].members[0].pageCount).toBe(8);
+    expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 2 } }]);
+  });
+
+  test("R6-F14 scope buttons are named after their scope", () => {
+    loadedPanel();
+    expect(byLabel("Remove scope Scope 1")).not.toBeNull();
+    expect(byLabel("Add override to Scope 1")).not.toBeNull();
+  });
+
   test("R4-F13 removing an override with the keyboard moves the focus to Add override, not to the next row's remove button", () => {
     loadedPanel();
     byFocus<HTMLButtonElement>("addov:scope-1").click();

@@ -270,9 +270,9 @@ describe("edge cases", () => {
     expect(h.pendingPages("C1")).toEqual([1, 3]);
     expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE");
     expect(await h.cls(h.appear("C1", 3))).toBe("RECEIVE");
-    // C2 shows only the last page: the earlier entry is superseded
+    // C2 shows only the last page: the earlier entry is superseded, kept as a tag only
     expect(await h.cls(h.appear("C2", 3))).toBe("RECEIVE");
-    expect(h.pendingPages("C2")).toEqual([]);
+    expect(h.state("C2").pending.map((p) => [p.page, p.expired])).toEqual([[1, "superseded"]]);
     expect(h.log.find("debug", /^GC dev=C2 page=1 seq=1 reason=superseded by seq=2/)).toHaveLength(1);
     expect(h.sw.calls.filter((c) => c.deviceId === "P")).toEqual([]);
   });
@@ -346,7 +346,7 @@ describe("edge cases", () => {
     expect(h.engine.snapshot().devices.every((d) => d.armed)).toBe(true);
     expect(h.log.find("info", /^SETTINGS applied \(update\) scopes=\[desk\{parent=P,children=2,overrides=1\}\] detachedPending=2$/)).toHaveLength(1);
     expect(await h.appear("C1", 4)).toMatchObject({ classification: "RECEIVE", late: false, issued: [] });
-    expect(h.log.find("info", /^RECEIVE dev=C1 page=4 seq=1 origin=P detached=true/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=4 seq=1 origin=P scope=desk detached=true/)).toHaveLength(1);
     expect(await h.cls(h.appear("C2", 2))).toBe("RECEIVE");
     expect(h.sw.calls).toHaveLength(2);
     // a detached parent-origin entry no longer suppresses the child
@@ -423,7 +423,7 @@ describe("edge cases", () => {
     const out = await h.appear("C1", 3); // the stale switch lands
     expect(out).toMatchObject({ classification: "RECEIVE_STALE", seq: 1 });
     expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C1", "profiles/mini", 4));
-    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=3 seq=1 origin=C2 landed after this device's own navigation seq=2; restoring page=4 seq=3$/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=3 seq=1 origin=C2 scope=desk landed after this device's own navigation seq=2; restoring page=4 seq=3$/)).toHaveLength(1);
     expect(await h.cls(h.appear("C1", 4))).toBe("RECEIVE");
     expect(await h.cls(h.appear("P", 3))).toBe("RECEIVE");
     expect(await h.cls(h.appear("P", 2))).toBe("RECEIVE");
@@ -546,7 +546,7 @@ describe("review findings", () => {
     expect(await h.cls(h.appear("C2", 3))).toBe("RECEIVE");
     expect(await h.cls(h.appear("C2", 1))).toBe("RECEIVE");
     expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([1, 1, 1]);
-    expect(h.log.find("info", /^RECEIVE dev=P page=3 seq=1 origin=C1 late=true/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE dev=P page=3 seq=1 origin=C1 scope=desk late=true/)).toHaveLength(1);
   });
 
   test("F1b a switch that stalls past the TTL and lands after the parent's own flip is absorbed, never rebroadcast, and not fought", async () => {
@@ -579,6 +579,8 @@ describe("review findings", () => {
     expect(out).toMatchObject({ classification: "RECEIVE", late: true, issued: [] });
     expect(h.sw.calls).toHaveLength(calls);
     expect(h.page("C2")).toBe(3);
+    expect(h.state("C2").pending.map((p) => [p.page, p.expired])).toEqual([[1, "ttl"], [0, "ttl"]]); // older tags stay until the grace period (a stalled app may still apply them)
+    h.clock.advance(27000); // past the grace period
     expect(await h.cls(h.nav("C2", 1))).toBe("SEND"); // and the next flip syncs again
   });
 
@@ -804,10 +806,10 @@ describe("review findings", () => {
     expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: "ttl" })]);
     // an expired entry does not predict where the device is: a send to its page is issued again
     await h.appear("P", 3);
-    await h.appear("C2", 3); // supersedes C2's own unconfirmed page-2 entry
-    expect(h.pendingPages("C2")).toEqual([]);
-    expect(h.log.find("debug", /^GC dev=C2 page=2 seq=1 reason=superseded by seq=2/)).toHaveLength(1);
-    expect(await h.cls(h.nav("C2", 2))).toBe("SEND"); // → P#2, C1#4
+    await h.appear("C2", 3); // supersedes C2's own unconfirmed page-2 entry, which stays the tag it already was
+    expect(h.state("C2").pending.map((p) => [p.page, p.expired])).toEqual([[2, "ttl"]]);
+    expect(h.log.find("debug", /^GC dev=C2 page=2 seq=1 reason=superseded/)).toHaveLength(0); // nothing changed for it
+    expect(await h.cls(h.nav("P", 2))).toBe("SEND"); // → C1#4 again (the expired tag predicts nothing), C2#2
     expect(h.sw.calls.filter((c) => c.deviceId === "C1").map((c) => c.page)).toEqual([4, 4]);
   });
 
@@ -848,7 +850,7 @@ describe("review findings", () => {
     expect(h.state("P").pending.map((p) => [p.page, p.expired])).toEqual([[1, "cap"], [2, false], [3, false], [4, false]]);
     const calls = h.sw.calls.length;
     expect(await h.appear("P", 1)).toMatchObject({ classification: "RECEIVE", seq: 1, late: false }); // the backlog plays out
-    expect(h.log.find("info", /^RECEIVE dev=P page=1 seq=1 origin=C1 capped=true/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE dev=P page=1 seq=1 origin=C1 scope=desk capped=true/)).toHaveLength(1);
     for (const pg of [2, 3, 4]) {
       h.leave("P", h.page("P")!);
       expect(await h.cls(h.appear("P", pg))).toBe("RECEIVE");
@@ -925,7 +927,7 @@ describe("review findings", () => {
     expect(h.pendingPages("P")).toEqual([3, 0]);
     const out = await h.appear("P", 0, { actionId: "editor-re-emit" });
     expect(out.reason).toBe("duplicate");
-    expect(h.pendingPages("P")).toEqual([]);
+    expect(h.state("P").pending.map((p) => [p.page, p.expired])).toEqual([[3, "superseded"]]);
     expect(h.log.find("debug", /reason=duplicate \(consumed seq=/)).toHaveLength(1);
   });
 
@@ -942,9 +944,9 @@ describe("review findings", () => {
     expect(h.state("C1").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[1, 1, "ttl"], [3, 2, false], [1, 3, false]]);
     const out = await h.appear("C1", 1);
     expect(out).toMatchObject({ classification: "RECEIVE", seq: 3, late: false });
-    expect(h.log.find("info", /^RECEIVE dev=C1 page=1 seq=3 origin=P \(echo/)).toHaveLength(1);
-    expect(h.pendingPages("C1")).toEqual([]); // the expired tag and the superseded switch are gone
-    expect(h.log.find("debug", /^GC dev=C1 page=1 seq=1 reason=superseded by seq=3/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=1 seq=3 origin=P scope=desk \(echo/)).toHaveLength(1);
+    expect(h.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[1, "ttl"], [3, "superseded"]]); // tags only
+    expect(h.log.find("debug", /^GC dev=C1 page=3 seq=2 reason=superseded by seq=3 \(kept as an echo tag for 3000ms\)/)).toHaveLength(1);
     expect(await h.cls(h.nav("C1", 0))).toBe("SEND"); // no dangling parent-origin entry suppresses the child
   });
 
@@ -960,7 +962,7 @@ describe("review findings", () => {
     await h.appear("C2", 1);
     const out = await h.appear("C1", 1);
     expect(out).toMatchObject({ classification: "RECEIVE", seq: 3, late: false });
-    expect(h.log.find("info", /^RECEIVE dev=C1 page=1 seq=3 origin=P \(echo/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=1 seq=3 origin=P scope=desk \(echo/)).toHaveLength(1);
     expect(h.log.find("info", /detached=true/)).toHaveLength(0);
     expect(await h.cls(h.nav("C1", 0))).toBe("SEND");
   });
@@ -1013,8 +1015,7 @@ describe("review findings", () => {
     expect(h.log.find("warn", /^QUEUE full dev=P page=3 reason=not-started — more than 2 navigations before the settings loaded; dropped the oldest \(dev=P page=1\)/)).toHaveLength(1);
     await h.engine.start(h.settings);
     expect(h.log.find("info", /^START .*queued=2$/)).toHaveLength(1);
-    expect(h.sw.calls).toEqual([h.call("C1", "profiles/mini", 3), h.call("C2", "profiles/xl", 3)]); // the newest kept navigation leads (R5-F4)
-    expect(h.log.find("debug", /^REPLAY dev=P page=2 .*reason=superseded/)).toHaveLength(1);
+    expect(h.sw.calls).toEqual([h.call("C1", "profiles/mini", 4), h.call("C2", "profiles/xl", 2), h.call("C1", "profiles/mini", 3), h.call("C2", "profiles/xl", 3)]); // P:2 ↔ C1:4
   });
 
   test("R4-F6 navigation queued before start is discarded when the device disconnects, so its reconnect burst stays startup", async () => {
@@ -1033,14 +1034,15 @@ describe("review findings", () => {
     expect(h.sw.calls).toEqual([]);
   });
 
-  test("R5-F4 pre-start navigations never conflict: the newest in a scope leads, earlier ones only record positions", async () => {
+  test("R5-F4/R6-F1 pre-start navigations never conflict: a replayed fan-out leaves a device alone whose own later flip is replayed next", async () => {
     const h = harness();
     for (const id of ["P", "C1", "C2"]) expect(await h.cls(h.appear(id, 0))).toBe("STARTUP");
     expect(await h.cls(h.nav("P", 1))).toBe("IGNORED");
     expect(await h.cls(h.nav("C1", 3))).toBe("IGNORED");
     await h.engine.start(h.settings);
-    expect(h.sw.calls).toEqual([h.call("P", "profiles/plus", 3), h.call("C2", "profiles/xl", 3)]); // the child's later flip leads
-    expect(h.log.find("debug", /^REPLAY dev=P page=1 action=P-p1 reason=superseded/)).toHaveLength(1);
+    expect(h.sw.calls).toEqual([h.call("C2", "profiles/xl", 1), h.call("P", "profiles/plus", 3), h.call("C2", "profiles/xl", 3)]); // C1's later flip is never driven, then leads
+    expect(h.log.find("debug", /^SKIP target=C1 seq=1 reason=queued-later/)).toHaveLength(1);
+    expect(h.log.find("info", /^SEND dev=P .*skipped=\[C1:queued-later\]$/)).toHaveLength(1);
     expect(h.log.find("info", /SUPPRESSED/)).toHaveLength(0);
     expect(h.page("P")).toBe(1); // where the human left it, until the switch lands
     expect(await h.cls(h.appear("P", 3))).toBe("RECEIVE");
@@ -1052,8 +1054,120 @@ describe("review findings", () => {
     await h.nav("C1", 3);
     await h.nav("P", 1);
     await h.engine.start(h.settings);
-    expect(h.sw.calls).toEqual([h.call("C1", "profiles/mini", 1), h.call("C2", "profiles/xl", 1)]); // C1 is on 3, so it is not already there
+    expect(h.sw.calls).toEqual([h.call("C2", "profiles/xl", 3), h.call("C1", "profiles/mini", 1), h.call("C2", "profiles/xl", 1)]); // C1 is on 3, so it is not already there
     expect(h.page("C1")).toBe(3);
+  });
+
+  test("R6-F1 when the later pre-start flip cannot lead (disabled page, no counterpart), the parent's earlier flip still reaches everyone else", async () => {
+    const disabled = harness();
+    for (const id of ["P", "C1", "C2"]) expect(await disabled.cls(disabled.appear(id, 0))).toBe("STARTUP");
+    await disabled.nav("P", 1);
+    await disabled.nav("C1", 3, { enabled: false });
+    await disabled.engine.start(disabled.settings);
+    expect(disabled.sw.calls).toEqual([disabled.call("C2", "profiles/xl", 1)]); // C2 follows the parent; C1 stays where its own flip put it
+    expect(disabled.log.find("info", /^IGNORED dev=C1 page=3 scope=desk reason=disabled$/)).toHaveLength(1);
+    expect([disabled.page("P"), disabled.page("C1")]).toEqual([1, 3]);
+
+    const orphan = harness();
+    for (const id of ["P", "C1", "C2"]) expect(await orphan.cls(orphan.appear(id, 0))).toBe("STARTUP");
+    await orphan.nav("P", 1);
+    await orphan.nav("C1", 2); // C1's page 2 has no counterpart (P:2 ↔ C1:4)
+    await orphan.engine.start(orphan.settings);
+    expect(orphan.sw.calls).toEqual([orphan.call("C2", "profiles/xl", 1)]);
+    expect(orphan.log.find("info", /^SEND dev=C1 .*skipped=\[P:no-counterpart, C2:no-counterpart\]$/)).toHaveLength(1);
+  });
+
+  test("R6-F2 a page left again before start is forgotten after its replay, so returning to it is navigation, not a duplicate", async () => {
+    const h = harness();
+    for (const id of ["P", "C1", "C2"]) expect(await h.cls(h.appear(id, 0))).toBe("STARTUP");
+    await h.nav("P", 1); // queued
+    h.leave("P", 1); // into a folder / an un-anchored page, still before start
+    await h.engine.start(h.settings);
+    expect(h.sw.calls).toEqual([h.call("C1", "profiles/mini", 1), h.call("C2", "profiles/xl", 1)]); // the flip is still replayed
+    expect(h.log.find("debug", /^LEAVE dev=P page=1 \(left before the settings loaded\)/)).toHaveLength(1);
+    expect(h.page("P")).toBeNull();
+    await h.appear("C1", 1);
+    await h.appear("C2", 1);
+    await h.nav("C1", 2); // no counterpart for P or C2
+    const back = await h.appear("P", 1); // out of the folder
+    expect(back.classification).toBe("SEND");
+    expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C1", "profiles/mini", 1)); // C1 is brought back
+  });
+
+  test("R6-F5 switches superseded by a later landing stay echo tags for one TTL: a backlog the app applies late is never rebroadcast", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 2); // C1#4 (override), C2#2
+    await h.appear("C2", 2);
+    h.clock.advance(5000); // C1's app stalls past the TTL
+    await h.nav("P", 1); // C1#4 expires; C1#1, C2#1
+    await h.appear("C2", 1);
+    await h.nav("P", 2); // C1#4 again (seq 3), C2#2
+    await h.appear("C2", 2);
+    expect(h.state("C1").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[4, 1, "ttl"], [1, 2, false], [4, 3, false]]);
+    const calls = h.sw.calls.length;
+    // The stalled app now applies all three switches in order: 4, 1, 4.
+    expect(await h.appear("C1", 4)).toMatchObject({ classification: "RECEIVE", seq: 3 }); // the fresh tag matches first; the rest become tags
+    expect(h.state("C1").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[4, 1, "ttl"], [1, 2, "superseded"]]);
+    h.leave("C1", 4);
+    expect(await h.appear("C1", 1)).toMatchObject({ classification: "RECEIVE", seq: 2, late: false });
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=1 seq=2 origin=P scope=desk superseded=true/)).toHaveLength(1);
+    h.leave("C1", 1);
+    expect(await h.appear("C1", 4)).toMatchObject({ classification: "RECEIVE", seq: 1, late: true });
+    expect(h.sw.calls).toHaveLength(calls); // nothing was rebroadcast
+    expect(h.log.find("info", /^SEND dev=C1/)).toHaveLength(0);
+    // The superseded tag lives one TTL from the landing that superseded it, not the full grace period.
+    const g = harness();
+    await g.boot();
+    await g.nav("P", 1);
+    await g.nav("P", 3);
+    await g.appear("C2", 3); // coalesced: page 1 superseded
+    g.clock.advance(3001);
+    await g.appear("C2", 3, { actionId: "poke" }); // ages C2's tags
+    expect(g.pendingPages("C2")).toEqual([]);
+    expect(g.log.find("debug", /^GC dev=C2 page=1 seq=1 reason=grace-elapsed \(3000ms without an appear\)/)).toHaveLength(1);
+  });
+
+  test("R6-F7 a device removed from its scope still has its detached switch undone when that lands after its own later flip", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 1); // C1#1 (seq 1), C2#1
+    await h.appear("C2", 1);
+    h.engine.onSettingsChanged(settingsWith(deskScope({ members: [{ deviceId: "P", role: "parent", profile: "profiles/plus" }, { deviceId: "C2", role: "child" }] }))); // C1 unscoped
+    expect(await h.nav("C1", 3)).toMatchObject({ classification: "IGNORED", reason: "no-scope" }); // recorded as C1's page (seq 2)
+    h.leave("C1", 3);
+    const out = await h.appear("C1", 1); // the detached switch lands after C1's own flip
+    expect(out).toMatchObject({ classification: "RECEIVE_STALE", seq: 1, issued: [{ deviceId: "C1", profile: "profiles/mini", page: 3, seq: 3 }] });
+    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=1 seq=1 origin=P scope=none detached=true landed after/)).toHaveLength(1);
+    expect(await h.appear("C1", 3)).toMatchObject({ classification: "RECEIVE", seq: 3 });
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=3 seq=3 origin=C1 scope=none \(echo/)).toHaveLength(1);
+  });
+
+  test("R6-F7 a switch detached by a settings change is still in flight: landing after the device's own later flip it is stale and restored", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 1); // C1#1, C2#1 (seq 1)
+    await h.appear("C2", 1);
+    h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk (renamed)" }))); // C1#1 detached
+    expect(await h.cls(h.nav("C1", 3))).toBe("SEND"); // not suppressed any more (seq 2): P#3, C2#3
+    await h.appear("P", 3);
+    await h.appear("C2", 3);
+    h.leave("C1", 3);
+    const out = await h.appear("C1", 1); // the detached switch lands after C1's own flip
+    expect(out).toMatchObject({ classification: "RECEIVE_STALE", seq: 1, issued: [{ deviceId: "C1", profile: "profiles/mini", page: 3, seq: 3 }] });
+    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=1 seq=1 origin=P scope=desk detached=true landed after this device's own navigation seq=2; restoring page=3 seq=3$/)).toHaveLength(1);
+    expect(await h.cls(h.appear("C1", 3))).toBe("RECEIVE"); // everyone on 3
+    // Past the TTL a detached entry ages into a plain late tag and no longer restores.
+    const g = harness();
+    await g.boot();
+    await g.nav("P", 1);
+    await g.appear("C2", 1);
+    g.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" })));
+    g.clock.advance(3001);
+    expect(await g.cls(g.nav("C1", 3))).toBe("SEND");
+    expect(g.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[1, "ttl"]]);
+    g.leave("C1", 3);
+    expect(await g.appear("C1", 1)).toMatchObject({ classification: "RECEIVE", late: true, issued: [] });
   });
 
   test("R5-F4 a device that leaves and returns to the same page before start still leads once", async () => {
@@ -1106,6 +1220,33 @@ describe("review findings", () => {
     await h.nav("P", 4); // a page the configuration knows: C1 has no counterpart (its page 4 is pinned), C2 does — not a configuration error
     expect(h.log.find("warn", /beyond-page-count/)).toHaveLength(1);
     expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C2", "profiles/xl", 4));
+    h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" }))); // a new configuration may have fixed it: warn again
+    await h.nav("P", 6);
+    expect(h.log.find("warn", /beyond-page-count/)).toHaveLength(2);
+  });
+
+  test("R6-F16 log levels are pinned: a disabled page is info, already-there is debug", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 3, { enabled: false });
+    expect(h.log.find("info", /^IGNORED dev=P page=3 scope=desk reason=disabled$/)).toHaveLength(1);
+    expect(h.log.find("debug", /reason=disabled/)).toHaveLength(0);
+    expect(h.log.find("warn", /reason=disabled/)).toHaveLength(0);
+    await h.nav("P", 0); // everyone is already on 0
+    expect(h.log.find("debug", /^SKIP target=C1 seq=2 reason=already-there$/)).toHaveLength(1);
+    expect(h.log.find("info", /^SKIP/)).toHaveLength(0);
+    expect(h.log.find("warn", /^SKIP/)).toHaveLength(0);
+  });
+
+  test("R6-F18 the grace period really is clamped to the TTL: an echo between the two is a plain RECEIVE", async () => {
+    const h = harness(deskScope(), { pendingTtlMs: 5000, pendingGraceMs: 100 });
+    await h.boot();
+    await h.nav("P", 1);
+    h.clock.advance(1000); // past the requested grace, within the TTL
+    const calls = h.sw.calls.length;
+    expect(await h.appear("C1", 1)).toMatchObject({ classification: "RECEIVE", late: false });
+    expect(h.sw.calls).toHaveLength(calls);
+    expect(h.log.find("debug", /grace-elapsed/)).toHaveLength(0);
   });
 
   test("R5-F17 a member the app has never reported is skipped as disconnected, with the warning", async () => {

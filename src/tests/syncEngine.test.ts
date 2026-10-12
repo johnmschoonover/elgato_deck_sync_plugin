@@ -670,11 +670,12 @@ describe("review findings", () => {
         const anchors: Array<[number, string]> = [[page, `${deviceId}-p${page}`]];
         if (stray !== undefined) anchors[copyFirst ? "unshift" : "push"]([stray, `${deviceId}-stray-on-${page}`]);
         const leaveAll = () => { for (const [idx, actionId] of leaving) h.leave(deviceId, idx, { actionId }); };
-        if (!appearFirst) leaveAll();
+        const same = current[deviceId] === page; // the app re-emits the page's anchors: the same anchors go and come back, in that order
+        if (!appearFirst || same) leaveAll();
         current[deviceId] = page;
         shown[deviceId] = anchors;
         for (const [idx, actionId] of anchors) await h.appear(deviceId, idx, { actionId });
-        if (appearFirst) leaveAll();
+        if (appearFirst && !same) leaveAll();
       }
     };
     /** The person flips a deck by hand: every anchor on the old page leaves, the new page's anchors appear. */
@@ -689,6 +690,77 @@ describe("review findings", () => {
     };
     return { h, current, drain, flip };
   }
+
+  /**
+   * Any number of decks with copied anchors, and a simulated app that applies every issued switch in
+   * order (`drain`), reporting events in either order, the copy first or second, and — when `reemit` —
+   * re-emitting a page's anchors on a switch to the page the deck already shows.
+   */
+  function loopRig(ids: string[], strays: Record<string, Record<number, number>>, hopMs: number, { appearFirst = false, copyFirst = false, reemit = false } = {}) {
+    const members: Scope["members"] = ids.map((id, i) => (i === 0 ? { deviceId: id, role: "parent", profile: "profiles/plus" } : { deviceId: id, role: "child" }));
+    const h = harness(deskScope({ members, mapping: { mode: "positional", overrides: [] } }));
+    ids.forEach((id, i) => { if (!h.devices.map.has(id)) h.devices.set(id, 1 + (i % 2)); });
+    const shown: Record<string, Array<[number, string]>> = Object.fromEntries(ids.map((id) => [id, [[0, `${id}-p0`]]]));
+    const anchorsOf = (deviceId: string, page: number): Array<[number, string]> => {
+      const anchors: Array<[number, string]> = [[page, `${deviceId}-p${page}`]];
+      const stray = strays[deviceId]?.[page];
+      if (stray !== undefined) anchors[copyFirst ? "unshift" : "push"]([stray, `${deviceId}-stray-on-${page}`]);
+      return anchors;
+    };
+    const show = async (deviceId: string, page: number) => {
+      const leaving = shown[deviceId];
+      const same = leaving[0][0] === page;
+      if (same && !reemit) return; // the deck is already there and the app shows nothing
+      const anchors = anchorsOf(deviceId, page);
+      const leaveAll = () => { for (const [idx, actionId] of leaving) h.leave(deviceId, idx, { actionId }); };
+      if (!appearFirst || same) leaveAll(); // a re-emit is the same anchors going and coming back, in that order
+      shown[deviceId] = anchors;
+      for (const [idx, actionId] of anchors) await h.appear(deviceId, idx, { actionId });
+      if (appearFirst && !same) leaveAll();
+    };
+    let applied = 0;
+    const drain = async (max = 400) => {
+      while (applied < h.sw.calls.length && applied < max) {
+        const { deviceId, page } = h.sw.calls[applied++];
+        h.clock.advance(hopMs);
+        await show(deviceId, page);
+      }
+      return applied < max;
+    };
+    const flip = async (deviceId: string, page: number) => {
+      for (const [idx, actionId] of shown[deviceId]) h.leave(deviceId, idx, { actionId });
+      shown[deviceId] = anchorsOf(deviceId, page);
+      const outs = [];
+      for (const [idx, actionId] of shown[deviceId]) outs.push(await h.appear(deviceId, idx, { actionId }));
+      return outs;
+    };
+    return { h, drain, flip, shown };
+  }
+
+  test.each([
+    [false, false], [true, false], [false, true], [true, true],
+  ])("R15-F1 one copied anchor per child across three children, driven round by switches alone, is cut off in either event order (appear first: %s, re-emits: %s)", async (appearFirst, reemit) => {
+    // C1's page 1 also says 2, C2's page 2 also says 3, C3's page 3 also says 1: every landing on a copied page sends the
+    // scope on to the next, and each child alternates a clean page with its copied one — out of the conflict breaker's
+    // reach (its run resets on every clean page), and with appears first the group read at a landing is the clean page's
+    // trailing disappear, which must not settle the copied page's send as clean.
+    for (const hopMs of [50, 300, 1000, 3500]) {
+      for (const first of [1, 3]) {
+        const { h, drain, flip } = loopRig(["P", "C1", "C2", "C3"], { P: {}, C1: { 1: 2 }, C2: { 2: 3 }, C3: { 3: 1 } }, hopMs, { appearFirst, reemit });
+        await h.boot(["P", "C1", "C2", "C3"]);
+        await flip("P", first);
+        expect(await drain(600)).toBe(true); // the decks come to rest …
+        const atRest = h.sw.calls.length;
+        expect(await drain(600)).toBe(true);
+        expect(h.sw.calls.length).toBe(atRest); // … for good
+        const trips = h.log.find("warn", /reason=overturned-switches/);
+        expect(trips.length).toBeGreaterThan(0);
+        expect(trips[0].msg).toMatch(/^IGNORED dev=C[123] /); // a child, never the parent
+        expect(h.log.find("info", /^SEND dev=P /)).toHaveLength(1);
+        expect(h.log.find("warn", /reason=conflicting-anchors/)).toHaveLength(0); // each child passes a clean page every cycle
+      }
+    }
+  });
 
   test.each([
     [false, false, false], [true, false, false], [false, true, false], [true, true, false],
@@ -1235,11 +1307,11 @@ describe("review findings", () => {
     await g.nav("C1", 1); // seq 3: P#1
     expect(await g.nav("P", 1)).toMatchObject({ classification: "RECEIVE", seq: 3 });
     expect(g.state("P").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[4, 1, "superseded"], [2, 2, "superseded"]]);
-    g.clock.advance(2500);
+    g.clock.advance(10_000);
     expect(await g.nav("P", 4)).toMatchObject({ classification: "RECEIVE", seq: 1 });
-    g.clock.advance(2500); // 5 s after the supersede: alive only because the landing refreshed it
-    expect(await g.nav("P", 2)).toMatchObject({ classification: "RECEIVE", seq: 2 });
-    g.clock.advance(2500);
+    g.clock.advance(25_000); // 35 s after the supersede: alive only because the landing refreshed it (R15-F10)
+    expect(await g.nav("P", 2)).toMatchObject({ classification: "RECEIVE", seq: 2, issued: [] });
+    g.clock.advance(25_000); // and the revived tag was refreshed again by that landing
     expect(await g.nav("P", 1)).toMatchObject({ classification: "RECEIVE", seq: 3, issued: [] });
     expect(g.log.find("info", /^SEND dev=P/)).toHaveLength(0);
   });
@@ -2451,7 +2523,7 @@ describe("review findings", () => {
       expect(await h.cls(h.navAppearFirst("P", to))).toBe("SEND");
       h.leave("P", to); // the folder opens: the page's anchor goes …
       expect(await h.appear("P", to)).toMatchObject({ classification: "IGNORED", reason: "duplicate" }); // … and comes back when it closes
-      expect(h.state("P").drivenRun).toBe(0);
+      expect(h.state("P").drivenRun).toBeLessThanOrEqual(1); // the appear-first flip's one conflict, until the next flip reads the old page's group
       for (const c of ["C1", "C2"]) await h.nav(c, to);
     }
     expect(h.log.find("warn", /conflicting-anchors|overturned-switches/)).toHaveLength(0);
@@ -2507,6 +2579,77 @@ describe("review findings", () => {
     expect(t.log.find("debug", /^OVERTURN dev=C1 pages=\[1,3\] \(a second index on a page a switch landed on; 1\/12\)/)).toHaveLength(1);
     expect(t.state("C1").drivenRun).toBe(2);
     expect(t.state("C1").overturnRun).toBe(1);
+  });
+
+  test("R15-F6 an anchor edit made inside a folder forgets the open disappear group: the folder closing over it is no conflict", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    await h.nav("P", 1);
+    for (const c of ["C1", "C2"]) await h.nav(c, 1);
+    expect(await h.cls(h.navAppearFirst("P", 2))).toBe("SEND"); // leaving = {1}
+    for (const c of ["C1", "C2"]) await h.nav(c, 2);
+    expect((await h.appear("P", undefined, { actionId: "folder-anchor" })).reason).toBe("no-page-index"); // the folder opens: its anchor has no index yet
+    h.leave("P", 2); // leaving = {1, 2}
+    h.engine.onAnchorUpdated({ deviceId: "P", actionId: "folder-anchor", pageIndex: 7, enabled: false, isInMultiAction: false }); // the person gives the folder anchor an index while inside it (docs/PROFILES.md)
+    const out = await h.appear("P", 2); // the folder closes (appears first) …
+    h.leave("P", 7, { actionId: "folder-anchor" }); // … and its anchor goes
+    expect(out.issued).toEqual([]); // nobody moves (the person never left page 2 for another)
+    expect(h.log.find("debug", /^CONFLICT dev=P pages=/)).toHaveLength(0); // the group {1, 2} was never read as two indices leaving together
+    expect(await h.cls(h.navAppearFirst("P", 3))).toBe("SEND");
+    expect(h.state("P").drivenRun).toBeLessThanOrEqual(1); // an appear-first flip's one conflict, as ever
+    for (const c of ["C1", "C2"]) await h.nav(c, 3);
+    expect(await h.cls(h.navAppearFirst("P", 4))).toBe("SEND");
+    expect(h.state("P").drivenRun).toBeLessThanOrEqual(1);
+    expect(h.log.find("warn", /conflicting-anchors/)).toHaveLength(0);
+  });
+
+  test("R15-F11 a page left again before start is not a re-emit after it: the person's return there leads", async () => {
+    const h = harness();
+    expect(await h.cls(h.appear("P", 0))).toBe("STARTUP");
+    h.leave("P", 0); // nothing else before the settings load
+    await h.engine.start(h.settings);
+    expect(h.state("P").leftPage).toBeNull();
+    for (const c of ["C1", "C2"]) expect(await h.cls(h.appear(c, 1))).toBe("STARTUP");
+    expect(await h.appear("P", 0)).toMatchObject({ classification: "SEND", issued: [{ deviceId: "C1", page: 0 }, { deviceId: "C2", page: 0 }] });
+    expect(h.log.find("debug", /reason=duplicate/)).toHaveLength(0);
+  });
+
+  test("R15-F12 a late older landing never lowers the last-landing mark: switches it passed by stay passed by", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    await h.nav("P", 1);
+    await h.nav("P", 2);
+    h.clock.advance(3100);
+    await h.nav("P", 3); // C1: [1 ttl, 2 ttl, 3]
+    expect(await h.nav("C1", 3)).toMatchObject({ classification: "RECEIVE", seq: 3 });
+    expect(h.state("C1").lastReceiveSeq).toBe(3);
+    expect(await h.nav("C1", 1)).toMatchObject({ classification: "RECEIVE", seq: 1, late: true }); // the backlog shows 1 after all
+    expect(h.state("C1").lastReceiveSeq).toBe(3);
+    expect(await h.cls(h.nav("C1", 4))).toBe("SEND");
+    expect(h.state("C1").overturnRun).toBe(0); // the tag for 2 was passed by before the landing on 3
+    expect(h.log.find("debug", /^OVERTURN dev=/)).toHaveLength(0);
+  });
+
+  test("R15-F13 a send that only looks driven because the old page is still on the visit keeps the run until that page has left alone", async () => {
+    const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+    await h.boot();
+    await h.nav("P", 1); // C1#1
+    h.clock.advance(3100); // unshown
+    expect(await h.cls(h.nav("C1", 3))).toBe("SEND"); // driven: the parent's switch to 1 has not shown
+    expect(h.state("C1").overturnRun).toBe(1);
+    await h.nav("P", 3);
+    h.clock.advance(31_000); // past the grace: nothing outstanding anywhere
+    expect(await h.cls(h.navAppearFirst("C1", 4))).toBe("SEND"); // page 3 still on the visit: clean unless it leaves with another index
+    expect(h.state("C1")).toMatchObject({ cleanPending: true, overturnRun: 1 });
+    await h.nav("P", 4);
+    h.leave("C1", 9, { actionId: "C1-stray-on-3" }); // page 3 had a second anchor after all: both leave together
+    expect(await h.cls(h.appear("C1", 0))).toBe("SEND"); // an appear-first flip again: page 4 still on the visit
+    expect(h.state("C1")).toMatchObject({ cleanPending: true, drivenRun: 3, overturnRun: 1 }); // the group {3,9} kept the run (not clean); the flip to 0 is deferred in turn
+    expect(h.log.find("debug", /^CONFLICT dev=C1 pages=\[3,9\]/)).toHaveLength(1);
+    await h.nav("P", 0);
+    h.leave("C1", 4); // alone
+    expect(await h.cls(h.appear("C1", 2))).toBe("SEND"); // read: a single-index group with nothing but page 0 on the visit — the flip to 0 was clean
+    expect(h.state("C1")).toMatchObject({ cleanPending: true, overturnRun: 0, drivenRun: 1 });
   });
 
   test("F26 a directory that fails for every target yields a SEND with every target skipped, nothing thrown", async () => {

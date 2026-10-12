@@ -667,6 +667,121 @@ describe("setup: scopes, roles, overrides", () => {
     expect(overrides()).toEqual([]);
   });
 
+  test("R15-F4 stepping a device out of its scope and back (arrow keys on the scope select) keeps the scope's overrides for it", () => {
+    const three = [...DEVICES, { id: "C2", name: "Deck C2", type: 2, isConnected: true }];
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }, { a: { deviceId: "P", page: 3 }, b: { deviceId: "C2", page: 4 } }] } }] };
+    const ws = openPanel();
+    ws.fromPlugin({ event: "devices", devices: three });
+    ws.fromPlugin({ event: "globalSettings", settings: saved, issues: [] });
+    const scopeOfC1 = () => byLabel<HTMLSelectElement>("Scope for Deck C1 (disconnected)");
+    const overrides = () => (ws.toPlugin("setGlobalSettings").at(-1)!.settings as { scopes: Array<{ mapping: { overrides: unknown[] } }> }).scopes[0].mapping.overrides;
+    select(scopeOfC1(), "__new"); // ArrowDown: into a new scope …
+    expect(document.querySelectorAll(".ds-scope")).toHaveLength(2);
+    expect(byLabel("Child device (override 2 of scope-1)")).toBeNull(); // (its pair is gone while it is away)
+    select(scopeOfC1(), "scope-1"); // … ArrowUp: and back
+    expect(document.querySelectorAll(".ds-scope")).toHaveLength(1);
+    expect(byLabel<HTMLSelectElement>("Child device (override 2 of scope-1)").value).toBe("C1");
+    select(scopeOfC1(), ""); // via "not synced" too
+    select(scopeOfC1(), "scope-1");
+    $("save").click();
+    expect(overrides()).toEqual([{ a: { deviceId: "P", page: 3 }, b: { deviceId: "C2", page: 4 } }, { a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }]);
+    // A pair does not come back into another scope, nor when its page was pinned to someone else meanwhile.
+    select(scopeOfC1(), "__new");
+    $("addScope").click();
+    select(scopeOfC1(), "scope-3");
+    expect(document.querySelectorAll('[aria-label^="Child device (override"]')).toHaveLength(1);
+    select(scopeOfC1(), "scope-1");
+    expect(document.querySelectorAll('[aria-label^="Child device (override"]')).toHaveLength(2); // back in scope-1: its pair returns
+    select(scopeOfC1(), "");
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "1"); // scope-1's remaining pair (P:3 ↔ C2:4) now pins parent page 1
+    select(scopeOfC1(), "scope-1");
+    expect(document.querySelectorAll('[aria-label^="Child device (override"]')).toHaveLength(1); // the remembered P:1 ↔ C1:2 would pin page 1 twice: not restored
+    // A pair removed by hand after it came back stays removed on the next round trip.
+    $("discard").click();
+    select(scopeOfC1(), "__new");
+    select(scopeOfC1(), "scope-1");
+    byLabel<HTMLButtonElement>("Remove override 2 of scope-1").click(); // C1's pair, restored a moment ago
+    expect(document.querySelectorAll('[aria-label^="Child device (override"]')).toHaveLength(1);
+    select(scopeOfC1(), "__new");
+    select(scopeOfC1(), "scope-1");
+    expect(document.querySelectorAll('[aria-label^="Child device (override"]')).toHaveLength(1);
+  });
+
+  test("R15-F4 remembered overrides are forgotten by Discard and by a confirmed save, like the profile memory", () => {
+    const ws = loadedPanel(); // no overrides saved
+    const scopeOfC1 = () => byLabel<HTMLSelectElement>("Scope for Deck C1 (disconnected)");
+    const rows = () => document.querySelectorAll('[aria-label^="Child device (override"]').length;
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "1");
+    setInput(byLabel("Child page (override 1 of scope-1)"), "2");
+    select(scopeOfC1(), ""); // the unsaved pair is remembered for scope-1 …
+    $("discard").click(); // … until the draft is thrown away
+    select(scopeOfC1(), "");
+    select(scopeOfC1(), "scope-1");
+    expect(rows()).toBe(0);
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "1");
+    setInput(byLabel("Child page (override 1 of scope-1)"), "2");
+    select(scopeOfC1(), "");
+    $("save").click(); // saved without C1 and without the pair
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ ...SAVED.scopes[0], members: [{ deviceId: "P", role: "parent" }] }] }, issues: [], id: lastSaveId(ws) });
+    select(scopeOfC1(), "scope-1");
+    expect(rows()).toBe(0); // what was saved has no pair for C1 to come back to
+  });
+
+  test("R15-F7 a page index typed but not yet committed is saved when the panel is hidden or torn down", () => {
+    const ws = openPanel({ pageIndex: 2, enabled: true });
+    setInput($("pageIndex"), "5"); // typing only: nothing saved yet (R13-F6)
+    expect(ws.events("setSettings")).toHaveLength(0);
+    window.dispatchEvent(new Event("pagehide"));
+    expect(ws.events("setSettings")).toHaveLength(1);
+    expect(ws.events("setSettings")[0].payload).toEqual({ enabled: true, pageIndex: 5 });
+    window.dispatchEvent(new Event("pagehide")); // nothing new to save
+    expect(ws.events("setSettings")).toHaveLength(1);
+    setInput($("pageIndex"), "-1"); // invalid: never flushed
+    window.dispatchEvent(new Event("pagehide"));
+    expect(ws.events("setSettings")).toHaveLength(1);
+    setInput($("pageIndex"), "7");
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(ws.events("setSettings")).toHaveLength(2);
+    expect(ws.events("setSettings")[1].payload).toEqual({ enabled: true, pageIndex: 7 });
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    const fresh = openPanel({ pageIndex: 2, enabled: true }); // never typed into: nothing to flush
+    window.dispatchEvent(new Event("pagehide"));
+    expect(fresh.events("setSettings")).toHaveLength(0);
+  });
+
+  test("R15-F8 a number box's own message gives the rejection list back once the box is valid again", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "problem A" }], id: lastSaveId(ws) });
+    const list = "Not saved — fix these and try again:\n• problem A";
+    expect(status()).toBe(list);
+    setInput(byLabel("Page count of Deck P"), "0");
+    expect(status()).toMatch(/^Pages .*must be a whole number, 1 or more\.$/);
+    setInput(byLabel("Page count of Deck P"), "6");
+    expect(byLabel("Page count of Deck P").getAttribute("aria-invalid")).toBe("false");
+    expect(status()).toBe(list);
+    $("discard").click();
+    setInput(byLabel("Page count of Deck P"), "0"); // with no rejection outstanding the box's message gives way to the unsaved note
+    setInput(byLabel("Page count of Deck P"), "6");
+    expect(status()).toBe("Unsaved changes.");
+  });
+
+  test("R15-F9 when the focused box is gone after a reload, the control that takes the focus does not take its text", () => {
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", profile: "profiles/xl" }], mapping: { mode: "positional", overrides: [] } }] };
+    const ws = loadedPanel(saved);
+    byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").focus();
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ ...saved.scopes[0], members: [{ deviceId: "P", role: "parent" }] }] }, issues: [] }); // a plain reload in which C1 is no longer a member
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").disabled).toBe(true);
+    const fallback = document.activeElement as HTMLSelectElement;
+    expect(fallback.getAttribute("aria-label")).toBe("Scope for Deck P");
+    expect(fallback.value).toBe("scope-1");
+    expect(fallback.selectedIndex).toBeGreaterThanOrEqual(0);
+  });
+
   test("R12-F10 text the browser cannot parse (a bad input with a blank value) stays flagged across a re-render and blocks Save", () => {
     const ws = loadedPanel();
     const box = byLabel<HTMLInputElement>("Page count of Deck P");

@@ -89,6 +89,7 @@
       let disconnected = false;               // the socket closed: the disconnect message stays until the panel is reopened
       let saveTimedOut = false;               // the pending Save got no reply in time: edits and Discard behave as if nothing were pending
       let rejected = false;                   // the last Save was rejected: its list of problems stays up while the user works through it
+      let rejectedText = "";                  // that list, to put back after a number box's own message
       const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
       const collapsed = new Set();            // scope ids the user collapsed
       const overrideIds = new WeakMap();      // override object → stable id, so a removed row's invalid text never lands on its successor
@@ -225,11 +226,13 @@
                 dirty = false;
                 invalidText.clear();
                 memberMemory.clear(); // what a device carried out of a scope before this save is not part of what was saved
+                overrideMemory.clear();
                 renderSetup();
               }
             } else if (!dirty && pendingSaveId === null) {
               draft = clone(saved); // a reload while nothing is being edited or saved
               memberMemory.clear();
+              overrideMemory.clear();
               applied = true;
               renderSetup();
             }
@@ -247,9 +250,10 @@
             pendingSaveId = null; // the draft stays dirty so the user can fix it
             pendingSave = null;
             rejected = dirty; // the list of problems is for the edits still in the draft: it stays while they are fixed
-            setStatus((dirty
+            rejectedText = (dirty
               ? "Not saved — fix these and try again:\n"
-              : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []), "err");
+              : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []);
+            setStatus(rejectedText, "err");
             break;
         }
       }
@@ -301,6 +305,15 @@
       });
       $("pageIndex").addEventListener("change", saveMarker);
       $("enabled").addEventListener("change", saveMarker);
+      // If the panel is torn down mid-edit (another key selected on the canvas, the app closing) the
+      // finished-edit save may never fire: a valid index typed since the last save is flushed then.
+      function flushMarker() {
+        if (!markerEdited) return;
+        const index = readPageIndex();
+        if (index !== null && index !== lastValidPageIndex) saveMarker();
+      }
+      window.addEventListener("pagehide", flushMarker);
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushMarker(); });
 
       function renderThisDevice() {
         $("thisDevice").textContent = thisDeviceId ? deviceName(thisDeviceId) : "(unknown)";
@@ -348,15 +361,23 @@
         return draft.scopes[draft.scopes.length - 1];
       }
 
-      const memberMemory = new Map(); // deviceId → { profile, pageCount } of a member moved out of a scope, kept for its next scope
+      const memberMemory = new Map();   // deviceId → { profile, pageCount } of a member moved out of a scope: they describe the device and follow it into its next scope
+      const overrideMemory = new Map(); // deviceId → Map(scopeId → the pairs it had there): they belong to the scope and come back only if the device rejoins it
+                                        // (stepping through the scope list with the arrow keys must not throw them away)
 
       function removeFromScope(deviceId) {
         const s = scopeOf(deviceId);
         if (!s) return;
         const member = s.members.find((m) => m.deviceId === deviceId);
+        const names = (o) => o.a.deviceId === deviceId || o.b.deviceId === deviceId;
         if (member) memberMemory.set(deviceId, { profile: member.profile, pageCount: member.pageCount });
+        const mine = s.mapping.overrides.filter(names);
+        if (mine.length) {
+          if (!overrideMemory.has(deviceId)) overrideMemory.set(deviceId, new Map());
+          overrideMemory.get(deviceId).set(s.id, mine);
+        }
         s.members = s.members.filter((m) => m.deviceId !== deviceId);
-        s.mapping.overrides = s.mapping.overrides.filter((o) => o.a.deviceId !== deviceId && o.b.deviceId !== deviceId);
+        s.mapping.overrides = s.mapping.overrides.filter((o) => !names(o));
         syncParentId(s);
       }
 
@@ -370,6 +391,17 @@
         if (kept.pageCount !== undefined) member.pageCount = kept.pageCount;
         scope.members.push(member);
         syncParentId(scope);
+        const pairs = overrideMemory.get(deviceId) && overrideMemory.get(deviceId).get(scope.id);
+        if (pairs) {
+          // Back in a scope it left: its pairs return — those that still fit (the parent may have changed meanwhile)
+          // and do not pin a page that was pinned since.
+          overrideMemory.get(deviceId).delete(scope.id);
+          for (const o of pairs) {
+            const fits = o.a.deviceId === scope.parentDeviceId && scope.members.some((m) => m.deviceId === o.b.deviceId && m.role === "child");
+            const pinned = scope.mapping.overrides.some((x) => x.a.page === o.a.page || (x.b.deviceId === o.b.deviceId && x.b.page === o.b.page));
+            if (fits && !pinned) scope.mapping.overrides.push(o);
+          }
+        }
       }
 
       function setRole(deviceId, role) {
@@ -441,6 +473,7 @@
         else if (raw === "" && blankPending) invalidText.set(input.dataset.focus, { text: "", invalid: false });
         else invalidText.delete(input.dataset.focus);
         if (invalid) setStatus(message, "err");
+        else if ($("status").textContent === message) setStatus(rejected ? rejectedText : "", rejected ? "err" : ""); // fixed: the box's message gives way (markDirty says the rest)
         return ok ? n : undefined;
       }
 
@@ -469,7 +502,7 @@
             // A control that is gone or disabled (Add scope after a disconnect) cannot take the focus: the next one that can does.
             const again = found && !found.disabled ? found : $("setup").querySelector("[data-focus]:not(:disabled)");
             if (again) {
-              if (typed) {
+              if (typed && again === found) { // (a fallback control is only focused: the text belongs to the box that is gone)
                 again.value = typed.value;
                 if (typed.invalid) again.setAttribute("aria-invalid", typed.invalid);
               }
@@ -667,6 +700,7 @@
         rejected = false;
         invalidText.clear();
         memberMemory.clear(); // a profile or page count typed and then discarded must not come back with the device
+        overrideMemory.clear();
         const active = document.activeElement;
         if (active && $("setup").contains(active)) active.blur(); // text being typed is discarded too, not carried across the re-render
         if (pendingSaveId !== null && !saveTimedOut) {

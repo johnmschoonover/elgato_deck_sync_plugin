@@ -57,15 +57,17 @@
  *   conflict adds to a per-device run; once the run exceeds `drivenSendMax`
  *   the device's sends are ignored with a warning, however slow the cycle,
  *   until a real page change (a disappear group with a single index) resets
- *   it. A disappear group is read at the next appear: a page the device comes
- *   straight back to (a folder, a page without an anchor) leaves the group,
- *   so neither that nor an app that reports a new page before the old page's
- *   disappear ever accumulates anything.
+ *   it. A disappear group is read at the next real page change: a page of it
+ *   reported again before that (a re-emit, a folder closing) is a return and
+ *   leaves the group, the rest waits, so neither that nor an app that reports
+ *   a new page before the old page's disappear ever accumulates anything.
  * - A driven-send breaker (children only, same bound): a send made while
  *   another deck's switch to a different page of this device has not shown,
  *   or from a visit a switch landed on, followed from a switch, not from a
  *   person. A run of such sends with no clean send between is cut off; a
- *   landing never lifts the cut-off. Parents are never cut off (PRD §6.3.3).
+ *   landing never lifts the cut-off. A send from a landed visit is settled by
+ *   the disappear group of that visit, never by an earlier page's trailing
+ *   disappear. Parents are never cut off (PRD §6.3.3).
  * - A parent that finds a target already heading for the right page on a
  *   child-issued switch takes that switch over (carrier promotion): its
  *   precedence is asserted even when it issues nothing.
@@ -196,11 +198,15 @@ type DeviceState = {
   disabledOnly: boolean;
   /** Page indices reported by appears and not yet left: more than one means two anchors disagree on the page. */
   visit: Set<number>;
-  /** Page indices that disappeared since the last appear (the current disappear group). */
+  /** Page indices that disappeared since the last real appear (the current disappear group). */
   leaving: Set<number>;
+  /** What was left of a disappear group when one of its pages came back (a re-emit, a folder closing): read when a real page change comes, unless the rest comes back too. */
+  closed: Set<number>;
+  /** Pages of the current group that came back; while everything on the visit came back, a further page of the group coming back is a return too. */
+  back: Set<number>;
   /** Conflicts in a row (a second index appearing on a visit, or two indices leaving together); a real page change resets it. */
   drivenRun: number;
-  /** Sends in a row made while a switch from another deck to a different page of this device had not shown (the overturned-switch breaker). */
+  /** Sends in a row made while a switch from another deck to a different page of this device had not shown, or from a visit a switch landed on (the driven-send breaker, `reason=overturned-switches`). */
   overturnRun: number;
   /** The page a disappear just took the device off; an appear for it with nothing between is a re-emit, not a landing. */
   leftPage: number | null;
@@ -208,8 +214,10 @@ type DeviceState = {
   lastReceiveSeq: number;
   /** A send that looked clean except for the old page still on the visit (appears reported first): the single-index disappear that follows confirms it. */
   cleanPending: boolean;
-  /** A send from a visit a switch landed on, before the old page left: a second anchor on that page, or the person's flip after the landing (appears first) — the disappear group tells. */
+  /** A send from a visit a switch landed on, before the old page left: a second anchor on that page, or the person's flip after the landing (appears first) — the disappear group that closes that visit tells. */
   drivenPending: boolean;
+  /** The landed page that send was made from: only the disappear group holding it settles the send (with appears first, the group read next may still be the previous page's trailing disappear). */
+  drivenPage: number | null;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -217,7 +225,7 @@ type Plan = IssuedSwitch & { settled: Promise<void> };
 export type EngineSnapshot = {
   seq: number;
   started: boolean;
-  devices: Array<Omit<DeviceState, "pending" | "visit" | "leaving"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
+  devices: Array<Omit<DeviceState, "pending" | "visit" | "leaving" | "closed" | "back"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
 };
 
 const ignored = (reason: IgnoreReason): Outcome => ({ classification: "IGNORED", reason, issued: [], skipped: [] });
@@ -290,7 +298,14 @@ export class SyncEngine {
       this.queued = [];
     }
     this.started = true;
-    for (const dev of this.devices.values()) dev.leftPage = null; // the pre-start history was replayed as navigation; nothing of it is a re-emit
+    for (const dev of this.devices.values()) {
+      // The pre-start history was replayed as navigation; nothing of it is a re-emit, and a page left
+      // before start that is reported again now is the person coming back to it.
+      dev.leftPage = null;
+      dev.leaving.clear();
+      dev.closed.clear();
+      dev.back.clear();
+    }
   }
 
   /** Validated settings from the PI or the global-settings event. */
@@ -352,9 +367,12 @@ export class SyncEngine {
     dev.pending = []; // nothing can land on an absent device
     dev.visit.clear();
     dev.leaving.clear();
+    dev.closed.clear();
+    dev.back.clear();
     dev.drivenRun = 0;
     dev.overturnRun = 0;
     dev.cleanPending = dev.drivenPending = false;
+    dev.drivenPage = null;
     dev.lastReceivePage = null;
     dev.leftPage = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
@@ -370,7 +388,7 @@ export class SyncEngine {
     return {
       seq: this.seq,
       started: this.started,
-      devices: [...this.devices.values()].map(({ visit: _visit, leaving: _leaving, ...d }) => ({
+      devices: [...this.devices.values()].map(({ visit: _visit, leaving: _leaving, closed: _closed, back: _back, ...d }) => ({
         ...d,
         pending: d.pending.map(({ seq, page, profile, originId, originRole, expired }) => ({ seq, page, profile, originId, originRole, expired })),
       })),
@@ -447,10 +465,14 @@ export class SyncEngine {
     const dev = this.device(ev.deviceId);
     const before = dev.lastKnownPage ?? "none";
     dev.visit.clear();
+    dev.leaving.clear(); // the edit redraws the visit: a disappear group still open belongs to nothing now (a folder closing over it is no conflict)
+    dev.closed.clear();
+    dev.back.clear();
     dev.lastReceivePage = null;
     dev.disabledOnly = false;
     dev.overturnRun = 0;
     dev.cleanPending = dev.drivenPending = false;
+    dev.drivenPage = null;
     dev.leftPage = null;
     this.warnedNoPage.delete(ev.actionId); // an index cleared (or set) later is worth a fresh warning
     if (ev.pageIndex === undefined) {
@@ -502,40 +524,41 @@ export class SyncEngine {
     // Visit bookkeeping (the conflicting-anchor breaker, rule 10): a second index reported before
     // the first one disappeared is a conflict.
     const conflict = [...dev.visit].some((p) => p !== page);
-    // The disappear group that closed the previous visit is read now that the page the device went
-    // to is known. The page the device was last known on, left and reported again with nothing
-    // between (a re-emit, below: a folder or a page without an anchor was opened and closed on it),
-    // was never left for another page: it leaves the group. What remains says what the previous
-    // visit was. One index (or none): a real page change, which ends any run of conflicts, and
-    // shows that a send which only looked driven because the old page was still on the visit
-    // (appears reported first) was clean (rule 10b). Two or more left together: a copied anchor
-    // with the wrong index, whatever order the app reports events in — a conflict (rule 10), and a
-    // send made from that page after a switch landed on it was its second anchor's, so driven (10b).
-    const group = dev.leaving.size > 0;
-    if (dev.leftPage === page) dev.leaving.delete(page);
-    if (group) {
-      if (dev.leaving.size <= 1) {
-        dev.drivenRun = 0;
-        if (dev.cleanPending || dev.drivenPending) dev.overturnRun = 0;
-      } else {
-        dev.drivenRun++;
-        this.log.debug(`CONFLICT dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (two page indices left one page together; ${dev.drivenRun}/${this.drivenMax})`);
-        if (dev.drivenPending) {
-          dev.overturnRun++;
-          this.log.debug(`OVERTURN dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (a second index on a page a switch landed on; ${dev.overturnRun}/${this.drivenMax})`);
-        }
-      }
-      dev.cleanPending = dev.drivenPending = false;
+    // A page of the open disappear group reported again while nothing new has appeared since — every
+    // index still up is one that came back from that group — is a return, not a landing: the app
+    // re-emitting the anchors of a page the device already shows on a switch to it (hardware item 2),
+    // or a folder or a page without an anchor opened and closed on it. The device never changed page.
+    // The rest of the group is held back (`closed`): it is read as the previous visit's group once a
+    // real page change comes — unless it comes back too, in which case there was nothing to read.
+    const returning = (dev.leaving.has(page) || dev.closed.has(page)) && [...dev.visit].every((p) => dev.back.has(p));
+    if (returning) {
+      for (const p of dev.leaving) if (p !== page) dev.closed.add(p);
+      dev.leaving.clear();
+      dev.closed.delete(page);
+      dev.back.add(page);
+    } else {
+      // A real page change: the group(s) that closed the previous visit are read now that the page
+      // the device went to is known. One index (or none): a real page change, which ends any run of
+      // conflicts. Two or more left together: a copied anchor with the wrong index, whatever order
+      // the app reports events in — a conflict (rule 10). A send deferred by rule 10b is settled only
+      // by the group of the visit it was made from: with appears reported first, the group read here
+      // may still be the previous page's trailing disappear, which says nothing about that visit. A
+      // send from a landed visit (`drivenPending`) waits for the group holding the landed page — one
+      // index: the person's flip after the landing, clean; two or more: its second anchor, driven. A
+      // send that only looked driven because the old page was still on the visit (`cleanPending`) is
+      // clean once nothing but the page it went to remains on the visit when a single-index group is read.
+      this.readGroup(dev, dev.closed);
+      this.readGroup(dev, dev.leaving);
+      dev.closed.clear();
+      dev.leaving.clear();
+      dev.back.clear();
     }
-    dev.leaving.clear();
     dev.visit.add(page);
-    // The page a disappear just took the device off, reported again with nothing between: the app
-    // re-emitting the anchors of a page a device already shows on a switch to it (hardware risk 2),
-    // or a return from a page without an anchor. Either way the device never changed page, so this
-    // is not the landing of a switch queued behind another. (Before start nothing is in flight and
-    // the queue keeps every navigation, so the shortcut would only drop a flip back to the page a
-    // trailing disappear just reported: it waits for start.)
-    const reemit = this.started && dev.leftPage === page;
+    // The page a disappear just took the device off, reported again with nothing between (or any
+    // return, above): not the landing of a switch queued behind another. (Before start nothing is in
+    // flight and the queue keeps every navigation, so the shortcut would only drop a flip back to the
+    // page a trailing disappear just reported: it waits for start.)
+    const reemit = this.started && (dev.leftPage === page || returning);
     dev.leftPage = null;
     // A switch landed on this visit and its page has not been left: a further index reported now is
     // a second anchor on that page — or, if the app reports appears first, the person's flip after
@@ -673,8 +696,9 @@ export class SyncEngine {
         dev.overturnRun++;
         this.log.debug(`OVERTURN dev=${dev.id} page=${page} outstanding=[page=${overturned.page} seq=${overturned.seq} origin=${overturned.originId}] action=${ev.actionId} (a send while another deck's switch to this device has not shown; ${dev.overturnRun}/${this.drivenMax})`);
       } else if (landedThisVisit !== null) {
-        dev.drivenPending = true; // settled by the disappear group that follows
-        this.log.debug(`OVERTURN? dev=${dev.id} page=${page} landed=${landedThisVisit} action=${ev.actionId} (a further index on a page a switch landed on — or the person's flip after it; the next disappear tells)`);
+        dev.drivenPending = true; // settled by the disappear group that closes this visit
+        dev.drivenPage = landedThisVisit;
+        this.log.debug(`OVERTURN? dev=${dev.id} page=${page} landed=${landedThisVisit} action=${ev.actionId} (a further index on a page a switch landed on — or the person's flip after it; the disappear group of this visit tells)`);
       } else if (!conflict) {
         dev.overturnRun = 0; // a clean flip: the person's own
       } else {
@@ -689,6 +713,28 @@ export class SyncEngine {
 
     // 11. SEND.
     return this.send(dev, scope, member, page, excluded);
+  }
+
+  /** Reads a disappear group once the page the device went to is known (see classify). */
+  private readGroup(dev: DeviceState, group: Set<number>): void {
+    if (group.size === 0) return;
+    const settles = dev.drivenPending && dev.drivenPage !== null && group.has(dev.drivenPage);
+    if (group.size <= 1) {
+      dev.drivenRun = 0;
+      if (settles || (dev.cleanPending && dev.visit.size <= 1)) dev.overturnRun = 0;
+    } else {
+      dev.drivenRun++;
+      this.log.debug(`CONFLICT dev=${dev.id} pages=[${[...group].join(",")}] (two page indices left one page together; ${dev.drivenRun}/${this.drivenMax})`);
+      if (settles) {
+        dev.overturnRun++;
+        this.log.debug(`OVERTURN dev=${dev.id} pages=[${[...group].join(",")}] (a second index on a page a switch landed on; ${dev.overturnRun}/${this.drivenMax})`);
+      }
+    }
+    dev.cleanPending = false;
+    if (settles) {
+      dev.drivenPending = false;
+      dev.drivenPage = null;
+    }
   }
 
   private arm(dev: DeviceState, page: number): void {
@@ -972,7 +1018,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0, leftPage: null, lastReceiveSeq: 0, cleanPending: false, drivenPending: false };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), closed: new Set(), back: new Set(), drivenRun: 0, overturnRun: 0, leftPage: null, lastReceiveSeq: 0, cleanPending: false, drivenPending: false, drivenPage: null };
       this.devices.set(id, dev);
     }
     return dev;

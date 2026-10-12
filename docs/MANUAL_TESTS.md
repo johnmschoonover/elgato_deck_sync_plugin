@@ -79,6 +79,8 @@ See `docs/SPIKE1.md` for the procedure and the result slot.
 
 ## Results
 
-| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-17 | D3 | Notes |
-|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | |
+| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-17 | D3 | Spike-1 | Icons | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| | | | | | | | | | | |
+
+Spike-1's detailed outcome goes in `docs/SPIKE1.md` (tick the column here); icon results are the section above.

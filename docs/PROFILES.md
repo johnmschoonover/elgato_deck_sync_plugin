@@ -24,10 +24,13 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 | Stream Deck XL (32 keys) | 2 | `profiles/xl.streamDeckProfile` | `profiles/xl` |
 | Stream Deck Neo (8 keys) | 9 | `profiles/neo.streamDeckProfile` | `profiles/neo` |
 | Stream Deck + (optional) | 7 | `profiles/plus.streamDeckProfile` | `profiles/plus` |
+| Stream Deck Studio (no default) | 10 | — | set *Profile* by hand, or add a row to `DEFAULT_PROFILE_BY_DEVICE_TYPE` in `src/profiles.ts` and pin it in `src/tests/profiles.test.ts` |
+| Stream Deck + XL (no default) | 13 | — | as above |
 
-The engine resolves a scope member's profile from its `profile` setting, or, when that is
-blank, from the device type using the `Name`s above (see `src/profiles.ts`). Any other
-device type must have `profile` set explicitly in the configuration UI. **Every profile
+(`@elgato/schemas` also numbers the Virtual Stream Deck 11 and the Galleon 100 SD 12; neither
+has pages to sync.) The engine resolves a scope member's profile from its `profile` setting,
+or, when that is blank, from the device type using the `Name`s above (see `src/profiles.ts`).
+Any other device type must have `profile` set explicitly in the configuration UI. **Every profile
 registered in `manifest.json → Profiles` must also appear in `DEFAULT_PROFILE_BY_DEVICE_TYPE`**
 (`src/tests/profiles.test.ts` enforces it). Bundling `profiles/plus` is therefore a
 three-place change, or `npm test` goes red: add `7: "profiles/plus"` to the table in
@@ -59,7 +62,8 @@ default name.
    ]
    ```
 
-   `AutoInstall` defaults to `true` (offered on install, PRD §7.4); leave `Readonly` unset so
+   `AutoInstall` defaults to `true` (offered on install, PRD §7.4; the schema says the field
+   needs app 6.6+, below our 7.1 floor); leave `Readonly` unset so
    users can customise button content. `DontAutoSwitchWhenInstalled` defaults to `false`, so
    the app switches each device to the bundled profile right after installing it — the
    intended zero-config path (PRD §8.6); set it to `true` only if gate D3 shows that is

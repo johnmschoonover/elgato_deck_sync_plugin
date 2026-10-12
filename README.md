@@ -77,7 +77,9 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    - Under the scope, add **overrides** (parent page ↔ child page) where the decks don't line up.
      Making a child the parent keeps the pairs, shown with the new parent's page first.
    - A device's *Profile* and *Pages* follow it when it is moved to another scope, or unassigned
-     and assigned again, within the open panel; its overrides belong to the scope it left.
+     and assigned again, until the next Save, Discard changes or reload of the panel; its
+     overrides belong to the scope it left, and come back with it if it rejoins that scope
+     before then (so stepping through the scope list with the arrow keys loses nothing).
    - **Add scope** creates an empty scope to assign devices to; choosing *Parent* for a device
      demotes the scope's previous parent to a child; moving the last member out removes the
      scope, and empty scopes are dropped on Save. Each scope box has a **Remove scope** button
@@ -136,7 +138,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
 | `IGNORED … reason=no-scope` (warn once per device per saved configuration, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
 | `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped (the device's 13th conflicting send in a row is ignored, 12 go through; a conflict is a page reporting two page indices): a page on that device carries a copied anchor with the wrong page index; its sends resume after a page with a single anchor |
-| `IGNORED … reason=overturned-switches` (warn, children only) | the other breaker tripped (the child's 13th send in a row that followed from a switch is ignored, 12 go through — a send made while another deck's switch to this child had not shown, or from a page a switch landed on): a page on this deck or on a deck it drives reports the wrong page index, or a page has no Page Anchor; its sends resume after a flip made with nothing outstanding from a page it was not switched to (a landing alone does not lift it) |
+| `IGNORED … reason=overturned-switches` (warn, children only) | the driven-send breaker tripped (the child's 13th send in a row that followed from a switch is ignored, 12 go through — a send made while another deck's switch to this child had not shown, or from a page a switch landed on): a page on this deck or on a deck it drives reports the wrong page index, or a page has no Page Anchor; its sends resume after a flip made with nothing outstanding from a page it was not switched to (a landing alone does not lift it) |
 | `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `SEND dev=P page=6 scope=desk reason=beyond-page-count pageCount=5 — …` (warn, once per device and page) | the device flipped to a page its *Pages* setting says it does not have; nobody can follow until *Pages* is raised |
 | `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 switches to one device still awaiting a landing; the oldest are kept as echo tags only |
@@ -196,8 +198,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   dial or touch strip.
 - Copied anchors whose page index was not updated make a page report two indices; a
   conflicting-anchor breaker stops the resulting ping-pong. Pages whose only anchor says the
-  wrong number can drive three or more decks round for ever; a second breaker cuts a child off
-  at its 13th send in a row that followed from a switch (12 go through). In both cases the fix
+  wrong number can drive three or more decks round for ever; the driven-send breaker (log reason
+  `overturned-switches`) cuts a child off at its 13th send in a row that followed from a switch
+  (12 go through). In both cases the fix
   is the anchor's index.
 - A deck that shows no Page Anchor when the plugin starts (another profile, or a page without
   one) is armed by its first anchored page: that first flip syncs nobody, and the deck leads

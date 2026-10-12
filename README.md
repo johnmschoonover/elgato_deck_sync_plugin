@@ -86,7 +86,7 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    | Message | Meaning |
    |---|---|
    | Loading the saved configuration… (table), Waiting for the plugin… | the plugin has not answered yet; **Save** / **Add scope** stay disabled |
-   | No reply from the plugin — is it running? Close and reopen this panel. | three requests went unanswered |
+   | The plugin did not receive this panel's messages — make sure the device is connected and this page is showing on it, then close and reopen the panel. | three requests went unanswered (the app only delivers a panel's messages while its page is showing) |
    | The plugin did not send its device list — … | only the device list is missing; scopes can still be edited |
    | Unsaved changes. / Saving… | the draft differs from what is saved / a Save is awaiting confirmation |
    | Saved. / Saved; you have further unsaved changes. | confirmed / confirmed, but you kept editing meanwhile: Save again |
@@ -117,7 +117,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000 queued=0` | engine started after connect (`queued`: flips made before the settings loaded, replayed next) |
 | `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later switch had already landed) |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later switch to the same page had already landed), `left=true` (the device had left this page before the switch showed) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `ANCHOR updated dev=P action=… page=2→3 enabled=true (no sync)` — or `… (consumed seq=n) (no sync)`, or `page=2→none (page index cleared; …)` | a visible anchor's settings were edited; the engine now knows the device is on that page (and takes a pending switch to that index as landed), or no longer knows its page |
@@ -134,9 +134,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
 | `DEVICE connected` (info for a device not yet armed: new, or after a disconnect; *debug* `(already armed; no change)` otherwise) / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
-| `LEAVE dev=P page=2`, `GC … reason=superseded` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch overtaken by a later landing or by the device leaving its page is kept as a tag only / an old tag was dropped |
-| `UNEXPECTED handler=onAppear …` (error) | a bug: the handler threw (caught) — please report it |
-| `Settings saved: n scope(s).` (info); `Settings: …` (warn: a scope rejected and why, `rejected a save … with n problem(s)`, `Could not save settings (…)`, `could not read global settings (…); using defaults`, `ignoring an unusable global-settings payload`, `no reply from Stream Deck within 15000ms`; *debug*: an event before start); `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message); `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
+| `LEAVE dev=P page=2`, `GC … reason=superseded` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch overtaken by a later landing on its page (kept as a tag for 3 s) or by the device leaving its page before it showed (kept for 30 s) / an old tag was dropped |
+| `UNEXPECTED handler=onAppear …` / `handler=onDisappear …` (error) | a bug: the handler threw (caught; a failed disappear changes nothing) — please report it |
+| `Settings saved: n scope(s).` (info); `Settings: …` (warn: a scope rejected and why, `rejected a save … with n problem(s)`, `rejected a save … that carried no usable settings`, `Could not save settings (…)`, `could not read global settings (…); using defaults`, `ignoring an unusable global-settings payload`, `no reply from Stream Deck within 15000ms`; *debug*: an event before start, an event or `the late reply` ignored because the panel's save is already applied); `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message); `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
 
 ## Troubleshooting
 
@@ -152,8 +152,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   `SKIP … disconnected` means the app has not reported the device as connected.
 - **A page flip did nothing once right after a switch** — expected only when the page you
   flipped to is one the plugin had just tried to switch that device to: the flip is logged as
-  a `RECEIVE` (plain within 3 s, `late=true` after a `SWITCH unconfirmed` warning, or
-  `superseded=true` when a later switch had landed first) instead of a `SEND`, and within the
+  a `RECEIVE` (plain within 3 s, `late=true` after a `SWITCH unconfirmed` warning,
+  `superseded=true` when a later switch to that page had landed first, or `left=true` when
+  the device had left the page before the switch showed) instead of a `SEND`, and within the
   first 3 s the deck can once jump back to its previous page. The switch never showed because
   the device was already there, the page has no Page Anchor, or the profile is not bundled;
   see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).

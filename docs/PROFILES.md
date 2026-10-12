@@ -9,7 +9,7 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 
 | Item | Rule |
 |---|---|
-| One profile per device type | Original/MK.2, XL, Mini, Neo (PRD §7.4). The Stream Deck + is not in that list although PRD §6.6 uses one as the parent (PRD §8.6): if an SD+ will be a scope member, export `profiles/plus` too, register it under `DeviceType 7` and add `7: "profiles/plus"` to `src/profiles.ts` (see below). Any other device type (Studio, Plus XL, …) has no default: set its *Profile* in the configuration UI. |
+| One profile per device type | Original/MK.2, XL, Mini, Neo (PRD §7.4). The Stream Deck + is not in that list although PRD §6.6 uses one as the parent (PRD §8.6): if an SD+ will be a scope member, export `profiles/plus` too, register it under `DeviceType 7` and make the three-place code change below. Any other device type (Studio, Plus XL, …) has no default: set its *Profile* in the configuration UI. |
 | Page count | **5** top-level pages (PRD §10 OQ-2). |
 | Marker placement | **Exactly one Page Anchor per page**, on the top-left key (column 0, row 0). Several anchors with the *same* page index on one page count as one navigation and merely waste keys; anchors with *different* indices on one page each send (manual check C-15) and, copied onto two decks, can trip the conflicting-anchor breaker. |
 | Anchor settings | `{ "pageIndex": N, "enabled": true }` where `N` is the **0-based** index of the page the anchor sits on. The Property Inspector sets these. |
@@ -29,9 +29,12 @@ The engine resolves a scope member's profile from its `profile` setting, or, whe
 blank, from the device type using the `Name`s above (see `src/profiles.ts`). Any other
 device type must have `profile` set explicitly in the configuration UI. **Every profile
 registered in `manifest.json → Profiles` must also appear in `DEFAULT_PROFILE_BY_DEVICE_TYPE`**
-(`src/tests/profiles.test.ts` enforces it), so when you bundle `profiles/plus`, add
-`7: "profiles/plus"` to the table; "set its *Profile* manually" is only for a profile that
-is *not* bundled under its device type's default name.
+(`src/tests/profiles.test.ts` enforces it). Bundling `profiles/plus` is therefore a
+three-place change, or `npm test` goes red: add `7: "profiles/plus"` to the table in
+`src/profiles.ts`, extend the key pin in `src/tests/profiles.test.ts` from `[0, 1, 2, 9]` to
+`[0, 1, 2, 7, 9]`, and add the Stream Deck + to the device list in PRD §7.4. "Set its
+*Profile* manually" is only for a profile that is *not* bundled under its device type's
+default name.
 
 ## Procedure (Stream Deck app, plugin installed and loading — after gate A3)
 

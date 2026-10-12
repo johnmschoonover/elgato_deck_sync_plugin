@@ -15,6 +15,7 @@ const mock = {
   stored: {} as unknown,
   switchCalls: [] as unknown[][],
   connect: null as null | (() => Promise<void>),
+  load: null as null | (() => Promise<unknown>),
 };
 
 jest.mock("@elgato/streamdeck", () => {
@@ -35,7 +36,7 @@ jest.mock("@elgato/streamdeck", () => {
       actions: { registerAction: (a: unknown) => { mock.registered.push(a); } },
       settings: {
         onDidReceiveGlobalSettings: (l: Listener) => { (mock.listeners.globalSettings ??= []).push(l); },
-        getGlobalSettings: async () => mock.stored,
+        getGlobalSettings: () => (mock.load ? mock.load() : Promise.resolve(mock.stored)),
         setGlobalSettings: async (s: unknown) => { mock.stored = s; },
       },
       ui: {
@@ -68,7 +69,9 @@ beforeEach(() => {
   mock.switchCalls.length = 0;
   mock.stored = {};
   mock.listeners = {};
+  mock.load = null;
 });
+afterEach(() => jest.useRealTimers());
 
 test("registers the action before connecting, starts after connect, and drives the SDK through the adapters", async () => {
   let resolveConnect = () => {};
@@ -125,6 +128,35 @@ test("settings arriving before start() has finished are not applied early: the e
   // From now on saves and events are applied directly.
   await fire("sendToPlugin", { payload: { event: "setGlobalSettings", settings: { version: GLOBAL_SETTINGS_VERSION, scopes: [] } } });
   expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[\]/)).toHaveLength(1);
+});
+
+test("a PI save that arrives while the start-up load is pending becomes the start configuration (R5-F16)", async () => {
+  let release: (s: unknown) => void = () => {};
+  mock.load = () => new Promise((resolve) => { release = resolve; });
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await settle(); // connected; the settings read is pending
+  await fire("sendToPlugin", { payload: { event: "setGlobalSettings", settings: scopeSettings("Saved during load") } });
+  expect(lines("sync", /^SETTINGS applied/)).toHaveLength(0);
+  release({});
+  await settle();
+  expect(lines("sync", /^SETTINGS applied \(start\) scopes=\[desk/)).toHaveLength(1);
+  expect(lines("sync", /^START devices=\[P,C1\] scopes=1 /)).toHaveLength(1);
+  expect(lines("sync", /^SETTINGS applied \(update\)/)).toHaveLength(0);
+});
+
+test("a lost global-settings reply does not stall start-up: after 15 s the engine starts with defaults and the late reply is applied (R5-F11)", async () => {
+  jest.useFakeTimers();
+  mock.load = () => new Promise(() => {}); // never answered
+  mock.connect = () => Promise.resolve();
+  jest.isolateModules(() => { require("../plugin"); });
+  await jest.advanceTimersByTimeAsync(14_999);
+  expect(lines("sync", /^START/)).toHaveLength(0);
+  await jest.advanceTimersByTimeAsync(1);
+  expect(lines("DeckSync", /^Settings: no reply from Stream Deck within 15000ms; starting with defaults/)).toHaveLength(1);
+  expect(lines("sync", /^START devices=\[P,C1\] scopes=0 /)).toHaveLength(1);
+  fire("globalSettings", { settings: scopeSettings("Late") }); // the SDK raises the event when the reply finally comes
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
 });
 
 test("a failed connect is logged as a start-up failure, never thrown", async () => {

@@ -178,3 +178,16 @@ describe("Property Inspector messages", () => {
     (mockState as unknown as { failSend: boolean }).failSend = false;
   });
 });
+
+describe("R5-F19 the PI's own settings read", () => {
+  test("is quiet: the issues go to the panel and the global-settings event logs them", async () => {
+    mockState.stored = { version: 2, scopes: [{ id: "bad", members: [] }] };
+    await message({ event: "getGlobalSettings" });
+    expect(mockState.sent).toEqual([{ event: "globalSettings", settings: createDefaultGlobalSettings(), issues: [expect.objectContaining({ scopeId: "bad" })] }]);
+    expect(log.warn).not.toHaveBeenCalled();
+    expect((await loadGlobalSettings(log, true)).issues).toHaveLength(1);
+    expect(log.warn).not.toHaveBeenCalled();
+    await loadGlobalSettings(log);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("Scope 'bad' ignored"));
+  });
+});

@@ -125,12 +125,17 @@ describe("connect and load", () => {
     expect(byLabel<HTMLSelectElement>("Scope for unknown device P").value).toBe("scope-1");
   });
 
-  test("the first load is authoritative: edits made before it arrived are discarded with a notice", () => {
+  test("nothing can be edited before the first load: the setup controls are disabled, then enabled by the reply", () => {
     const ws = openPanel();
     ws.fromPlugin({ event: "devices", devices: DEVICES });
     expect($("setup").textContent).toContain("Loading the saved configuration");
-    $("addScope").click(); // disabled, so nothing happens
+    expect($("setup").querySelectorAll("input, select, button")).toHaveLength(0);
+    expect($<HTMLButtonElement>("addScope").disabled).toBe(true);
+    expect($<HTMLButtonElement>("save").disabled).toBe(true);
+    $("addScope").click(); // disabled: nothing happens
     ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [] });
+    expect($<HTMLButtonElement>("addScope").disabled).toBe(false);
+    expect($<HTMLButtonElement>("save").disabled).toBe(false);
     expect(status()).toBe("");
     expect(document.querySelectorAll(".ds-scope")).toHaveLength(1);
   });
@@ -164,15 +169,19 @@ describe("this marker", () => {
     expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: false } });
   });
 
-  test("an invalid page index is flagged and not saved", () => {
-    const ws = loadedPanel();
+  test("an invalid page index is flagged and not saved, while Enabled still is (R5-F13)", () => {
+    const ws = loadedPanel(SAVED, { pageIndex: 2, enabled: true });
     setInput($("pageIndex"), "-1");
     expect($("pageIndex").getAttribute("aria-invalid")).toBe("true");
-    expect(status()).toBe("Page index must be a whole number, 0 or more. Not saved.");
-    expect(ws.events("setSettings")).toHaveLength(0);
+    expect(status()).toBe("Page index must be a whole number, 0 or more. The page index was not saved; Enabled was.");
+    expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: true, pageIndex: 2 } }); // the last valid index
+    $<HTMLInputElement>("enabled").checked = false;
+    $("enabled").dispatchEvent(new Event("change"));
+    expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: false, pageIndex: 2 } });
     setInput($("pageIndex"), "4");
     expect($("pageIndex").getAttribute("aria-invalid")).toBe("false");
     expect(status()).toBe("");
+    expect(ws.events("setSettings").pop()).toEqual({ event: "setSettings", context: "pi-uuid", payload: { enabled: false, pageIndex: 4 } });
   });
 
   test("R4-F11 a late didReceiveSettings reply does not overwrite a page index the user already typed", () => {
@@ -218,16 +227,16 @@ describe("setup: scopes, roles, overrides", () => {
 
   test("a rejected save keeps the draft dirty and shows the reasons", () => {
     const ws = loadedPanel();
-    setInput(byLabel("Scope name"), "Desk");
+    setInput(byLabel("Name of scope-1"), "Desk");
     $("save").click();
     ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "Scope 'scope-1' ignored: a scope needs exactly one parent; found 0." }] });
     expect(status()).toBe("Not saved — fix these and try again:\n• Scope 'scope-1' ignored: a scope needs exactly one parent; found 0.");
-    expect(byLabel<HTMLInputElement>("Scope name").value).toBe("Desk");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk");
   });
 
   test("no reply to a save is reported after 5 s", () => {
     loadedPanel();
-    setInput(byLabel("Scope name"), "Desk");
+    setInput(byLabel("Name of scope-1"), "Desk");
     $("save").click();
     jest.advanceTimersByTime(5000);
     expect(status()).toBe("No reply from the plugin — is it running? Try Save again.");
@@ -235,29 +244,56 @@ describe("setup: scopes, roles, overrides", () => {
 
   test("R4-F8 edits made while a save is in flight are kept, and the reply says so", () => {
     const ws = loadedPanel();
-    setInput(byLabel("Scope name"), "Desk");
+    setInput(byLabel("Name of scope-1"), "Desk");
     $("save").click();
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as Msg;
-    setInput(byLabel("Scope name"), "Desk 2"); // typed while the plugin was saving
+    setInput(byLabel("Name of scope-1"), "Desk 2"); // typed while the plugin was saving
     ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
     expect(status()).toBe("Saved; you have further unsaved changes.");
-    expect(byLabel<HTMLInputElement>("Scope name").value).toBe("Desk 2");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk 2");
     $("save").click();
     expect((ws.toPlugin("setGlobalSettings")[1].settings as { scopes: Array<{ name: string }> }).scopes[0].name).toBe("Desk 2");
+  });
+
+  test("R5-F10 Discard while a save is in flight cannot take the save back: the confirmed configuration is adopted", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings")[0].settings as Msg;
+    $("discard").click();
+    expect(status()).toBe("Saving… (the save already sent cannot be discarded)");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1"); // until the plugin answers
+    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
+    expect(status()).toBe("Saved.");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk"); // what the plugin holds
+    $("save").click();
+    expect((ws.toPlugin("setGlobalSettings")[1].settings as { scopes: Array<{ name: string }> }).scopes[0].name).toBe("Desk"); // a re-save changes nothing
+  });
+
+  test("R5-F15 devices with the same name are told apart by their id; override rows carry their number", () => {
+    const twins = [{ id: "A", name: "Stream Deck", type: 0, isConnected: true }, { id: "B", name: "Stream Deck", type: 0, isConnected: true }];
+    const ws = openPanel({}, "A");
+    ws.fromPlugin({ event: "devices", devices: twins });
+    ws.fromPlugin({ event: "globalSettings", settings: { version: 2, scopes: [{ id: "scope-1", name: "Twins", parentDeviceId: "A", members: [{ deviceId: "A", role: "parent" }, { deviceId: "B", role: "child" }], mapping: { mode: "positional", overrides: [{ a: { deviceId: "A", page: 1 }, b: { deviceId: "B", page: 2 } }, { a: { deviceId: "A", page: 3 }, b: { deviceId: "B", page: 4 } }] } }] }, issues: [] });
+    expect($("thisDevice").textContent).toBe("Stream Deck (A)");
+    expect(byLabel<HTMLSelectElement>("Role of Stream Deck (B)").value).toBe("child");
+    expect(byLabel<HTMLInputElement>("Child page (override 2 of scope-1)").value).toBe("4");
+    expect(byLabel("Remove override 2 of scope-1")).not.toBeNull();
+    expect(byLabel<HTMLSelectElement>("Child device (override 1 of scope-1)").value).toBe("B");
   });
 
   test("overrides: added with the parent/child pre-filled, edited, and validated on Save (R4-F12 a blank page box blocks Save)", () => {
     const ws = loadedPanel();
     byFocus<HTMLButtonElement>("addov:scope-1").click();
     expect(document.querySelector(".ds-scope summary")!.textContent).toContain("1 override(s)");
-    setInput(byLabel("Parent page"), "2");
-    setInput(byLabel("Child page"), "4");
-    setInput(byLabel("Child page"), ""); // mid-edit blank keeps the draft's 4 but must not be saved as such
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "2");
+    setInput(byLabel("Child page (override 1 of scope-1)"), "4");
+    setInput(byLabel("Child page (override 1 of scope-1)"), ""); // mid-edit blank keeps the draft's 4 but must not be saved as such
     $("save").click();
     expect(status()).toBe("Fix the highlighted fields first.");
-    expect(byLabel("Child page").getAttribute("aria-invalid")).toBe("true");
+    expect(byLabel("Child page (override 1 of scope-1)").getAttribute("aria-invalid")).toBe("true");
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
-    setInput(byLabel("Child page"), "3");
+    setInput(byLabel("Child page (override 1 of scope-1)"), "3");
     $("save").click();
     expect((ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ mapping: { overrides: unknown[] } }> }).scopes[0].mapping.overrides)
       .toEqual([{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 3 } }]);
@@ -267,10 +303,10 @@ describe("setup: scopes, roles, overrides", () => {
     loadedPanel();
     byFocus<HTMLButtonElement>("addov:scope-1").click();
     byFocus<HTMLButtonElement>("addov:scope-1").click();
-    const remove = byLabel<HTMLButtonElement>("Remove override");
+    const remove = byLabel<HTMLButtonElement>("Remove override 1 of scope-1");
     remove.focus();
     remove.click();
-    expect(document.querySelectorAll('[aria-label="Remove override"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[aria-label^="Remove override"]')).toHaveLength(1);
     expect(document.activeElement).toBe(byFocus("addov:scope-1"));
   });
 
@@ -302,14 +338,14 @@ describe("setup: scopes, roles, overrides", () => {
 
   test("a device push re-renders only when the list changed, keeping the control being edited", () => {
     const ws = loadedPanel();
-    const name = byLabel<HTMLInputElement>("Scope name");
+    const name = byLabel<HTMLInputElement>("Name of scope-1");
     name.focus();
     setInput(name, "Des");
     ws.fromPlugin({ event: "devices", devices: DEVICES }); // unchanged list
     expect(document.activeElement).toBe(name);
     ws.fromPlugin({ event: "devices", devices: [DEVICES[0], { ...DEVICES[1], isConnected: true }] });
-    expect(byLabel<HTMLInputElement>("Scope name").value).toBe("Des");
-    expect(document.activeElement).toBe(byLabel("Scope name")); // focus restored on the re-rendered control
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Des");
+    expect(document.activeElement).toBe(byLabel("Name of scope-1")); // focus restored on the re-rendered control
     expect(document.querySelector(".ds-scope summary")!.textContent).toBe("Des: parent Deck P, 1 child");
   });
 });

@@ -2,7 +2,7 @@ import streamDeck from "@elgato/streamdeck";
 import { PageAnchorAction } from "./actions/page-anchor";
 import { describeError } from "./log";
 import { createGlobalSettingsHandler, loadGlobalSettings, registerPropertyInspectorBridge } from "./piBridge";
-import type { GlobalSettings } from "./settings";
+import { createDefaultGlobalSettings, type GlobalSettings } from "./settings";
 import { SyncEngine, type DeviceInfo } from "./syncEngine";
 
 const log = streamDeck.logger.createScope("DeckSync");
@@ -49,12 +49,19 @@ registerPropertyInspectorBridge({
   },
 });
 
+/** The SDK's global-settings read has no timeout of its own; never let a lost reply keep the engine from starting. */
+const SETTINGS_LOAD_TIMEOUT_MS = 15_000;
+
 streamDeck
   .connect()
   .then(async () => {
     // Devices are known only after connecting; start never issues a switch.
-    const { settings } = await loadGlobalSettings(log);
-    await engine.start(savedBeforeStart ?? settings);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SETTINGS_LOAD_TIMEOUT_MS); });
+    const loaded = await Promise.race([loadGlobalSettings(log).then((r) => r.settings), timeout]);
+    clearTimeout(timer);
+    if (!loaded) log.warn(`Settings: no reply from Stream Deck within ${SETTINGS_LOAD_TIMEOUT_MS}ms; starting with defaults — they are applied when the reply arrives, or reopen a Page Anchor's Property Inspector to reload them.`);
+    await engine.start(savedBeforeStart ?? loaded ?? createDefaultGlobalSettings());
     started = true;
     if (savedBeforeStart) engine.onSettingsChanged(savedBeforeStart); // a no-op unless it arrived during start()
   })

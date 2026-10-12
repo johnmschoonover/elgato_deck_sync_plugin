@@ -83,6 +83,7 @@
       let loadTimer = null;                   // "no reply" watchdog for the initial load
       let pendingSave = null;                 // the scopes as sent by Save, to notice edits made meanwhile
       let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
+      let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
       const collapsed = new Set();            // scope ids the user collapsed
 
@@ -187,14 +188,14 @@
               initialStateArrived();
               $("save").disabled = false;
               $("addScope").disabled = false;
-              const discarded = dirty;
               draft = clone(saved);
               dirty = false;
               renderSetup();
-              setStatus(discarded ? "Configuration loaded; edits made before it arrived were discarded." : "", discarded ? "err" : "");
+              setStatus("", "");
             } else if (statusWasSaving) {
-              // Edits made while the plugin was saving stay in the draft, still unsaved.
-              editedMeanwhile = JSON.stringify(draft.scopes) !== pendingSave;
+              // Edits made while the plugin was saving stay in the draft, still unsaved. A Discard
+              // made meanwhile (dirty is false) adopts the confirmed configuration instead.
+              editedMeanwhile = dirty && JSON.stringify(draft.scopes) !== pendingSave;
               if (!editedMeanwhile) {
                 draft = clone(saved);
                 dirty = false;
@@ -227,7 +228,9 @@
         const raw = settings.pageIndex;
         const present = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "");
         const n = Number(raw);
-        $("pageIndex").value = present && Number.isInteger(n) && n >= 0 ? String(n) : "";
+        const valid = present && Number.isInteger(n) && n >= 0;
+        $("pageIndex").value = valid ? String(n) : "";
+        lastValidPageIndex = valid ? n : undefined;
         $("enabled").checked = settings.enabled !== false;
       }
 
@@ -239,18 +242,17 @@
         const bad = !!(input.validity && input.validity.badInput);
         const valid = !bad && (raw === "" || (Number.isInteger(n) && n >= 0));
         input.setAttribute("aria-invalid", valid ? "false" : "true");
-        if (!valid) {
-          setStatus("Page index must be a whole number, 0 or more. Not saved.", "err");
-          return;
-        }
         markerEdited = true;
+        // An invalid page index is not saved, but the Enabled box still is (with the last valid index).
+        if (valid) lastValidPageIndex = raw === "" ? undefined : n;
         const payload = { enabled: $("enabled").checked };
-        if (raw !== "") payload.pageIndex = n;
+        if (lastValidPageIndex !== undefined) payload.pageIndex = lastValidPageIndex;
         if (!send({ event: "setSettings", context: uuid, payload })) {
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;
         }
-        if ($("status").textContent.startsWith("Page index")) setStatus("", "");
+        if (!valid) setStatus("Page index must be a whole number, 0 or more. The page index was not saved; Enabled was.", "err");
+        else if ($("status").textContent.startsWith("Page index")) setStatus("", "");
       }
       $("pageIndex").addEventListener("input", saveMarker);
       $("enabled").addEventListener("change", saveMarker);
@@ -264,7 +266,8 @@
       function deviceName(id) {
         const d = devices.find((x) => x.id === id);
         if (!d) return `unknown device ${id}`;
-        return d.isConnected ? d.name : `${d.name} (disconnected)`;
+        const name = devices.some((x) => x !== d && x.name === d.name) ? `${d.name} (${id})` : d.name; // two of a kind
+        return d.isConnected ? name : `${name} (disconnected)`;
       }
 
       function defaultProfile(id) {
@@ -472,7 +475,7 @@
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
-          el("input", { type: "text", value: scope.name, "aria-label": "Scope name", "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
+          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
           el("button", { class: "ds-fixed", "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
 
         if (parent && children.length) {
@@ -491,19 +494,20 @@
 
       function renderOverride(scope, parent, children, o, index) {
         const key = (part) => `ov:${scope.id}:${index}:${part}`;
-        const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": label, "data-focus": key(part),
+        const row = `override ${index + 1} of ${scope.id}`; // accessible names must tell the rows apart
+        const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": `${label} (${row})`, "data-focus": key(part),
           oninput: (ev) => {
             // Mid-edit blanks keep the previous value; anything else invalid is flagged until fixed.
-            const n = readNumber(ev.target, 0, `${label} must be a whole number, 0 or more.`);
+            const n = readNumber(ev.target, 0, `${label} (${row}) must be a whole number, 0 or more.`);
             if (n !== undefined) { ref.page = n; markDirty(); }
           } });
         return el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a, "Parent page", "a"),
           el("span", { class: "ds-fixed" }, "↔"),
-          el("select", { "aria-label": "Child device", "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
+          el("select", { "aria-label": `Child device (${row})`, "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
             ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
           el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page", "b"),
-          el("button", { class: "ds-fixed", "aria-label": "Remove override", "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); focusNext = `addov:${scope.id}`; }) }, "×"));
+          el("button", { class: "ds-fixed", "aria-label": `Remove ${row}`, "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); focusNext = `addov:${scope.id}`; }) }, "×"));
       }
 
       /* ---------------- save / discard ---------------- */
@@ -545,7 +549,13 @@
       $("discard").addEventListener("click", () => {
         draft = clone(saved);
         dirty = false;
-        setStatus("", "");
+        if (statusWasSaving) {
+          // The save already went out and cannot be taken back; its confirmation is adopted as is.
+          pendingSave = null;
+          setStatus("Saving… (the save already sent cannot be discarded)", "");
+        } else {
+          setStatus("", "");
+        }
         renderSetup();
       });
 
@@ -555,8 +565,10 @@
 
       function setStatus(text, kind) {
         const s = $("status");
+        const className = "ds-block ds-status" + (kind ? " " + kind : "");
+        if (s.textContent === text && s.className === className) return; // a live region re-announces every write
         s.textContent = text;
-        s.className = "ds-block ds-status" + (kind ? " " + kind : "");
+        s.className = className;
       }
 
       renderSetup();

@@ -15,9 +15,15 @@
  *   that match and is still in flight was processed without an appear (the
  *   device was already there, the page has no anchor, or the app coalesced
  *   it), and switches to the same page issued right after it with no other
- *   page between can never produce another appear: both become echo tags for
- *   one TTL (superseded). Everything issued after stays in flight, since the
- *   app may still have it queued.
+ *   page between can never produce another appear: both become echo tags
+ *   (superseded). Everything issued after stays in flight, since the app may
+ *   still have it queued. A superseded switch that shows after all (the
+ *   landing that wrote it off was the person's own flip) revives the switch
+ *   that superseded it as a tag: the app is still working through its queue.
+ * - The page a disappear just took the device off, reported again with
+ *   nothing between (the app re-emitting a page's anchors, or a return from
+ *   a page without one), is a duplicate, not a landing — unless the switch
+ *   to it is the next the app would apply.
  * - Any other appear on an armed device is human navigation → SEND to the
  *   rest of its scope, mapped through the parent's page (src/mapping.ts).
  * - Devices start un-armed; the first appear after plugin start or device
@@ -37,10 +43,13 @@
  *   unconfirmed entry is marked expired: it no longer suppresses a child,
  *   counts as where the device will be, or triggers a restore, but it remains
  *   an echo tag, so a late landing is still a RECEIVE. Expired entries are
- *   dropped after `pendingGraceMs` (a superseded tag after one TTL), replaced
- *   by a newer tag for the same page, or when the device disconnects; past
- *   `maxPendingPerDevice` still-expected entries become tags too, so memory is
- *   bounded without ever forgetting that a switch was issued.
+ *   dropped after `pendingGraceMs`, when a newer tag for the same page follows
+ *   with nothing between (one tag per run of switches to a page: the app shows
+ *   the page once per run, and again after every other page in a backlog),
+ *   or when the device disconnects; past `maxPendingPerDevice` still-expected
+ *   entries become tags too, and tags are bounded likewise (that many per TTL
+ *   of the grace period), so memory is bounded without ever forgetting that a
+ *   switch was issued.
  * - A conflicting-anchor breaker: a page that reports two page indices in one
  *   visit (two anchors appearing without a disappear between them, or two
  *   indices disappearing together) carries a copied anchor with the wrong
@@ -48,8 +57,18 @@
  *   conflict adds to a per-device run; once the run exceeds `drivenSendMax`
  *   the device's sends are ignored with a warning, however slow the cycle,
  *   until a real page change (a disappear group with a single index) resets
- *   it. An app that reports a new page before the old page's disappear
- *   therefore never accumulates anything.
+ *   it. A disappear group is read at the next appear: a page the device comes
+ *   straight back to (a folder, a page without an anchor) leaves the group,
+ *   so neither that nor an app that reports a new page before the old page's
+ *   disappear ever accumulates anything.
+ * - A driven-send breaker (children only, same bound): a send made while
+ *   another deck's switch to a different page of this device has not shown,
+ *   or from a visit a switch landed on, followed from a switch, not from a
+ *   person. A run of such sends with no clean send between is cut off; a
+ *   landing never lifts the cut-off. Parents are never cut off (PRD §6.3.3).
+ * - A parent that finds a target already heading for the right page on a
+ *   child-issued switch takes that switch over (carrier promotion): its
+ *   precedence is asserted even when it issues nothing.
  * - Leaving a page while a switch to it is still in flight: if nothing the
  *   plugin issued explains the departure (no earlier switch queued ahead of
  *   it, no RECEIVE that just moved the device off the page), the device was
@@ -91,11 +110,11 @@ export type EngineDeps = { switcher: Switcher; clock: Clock; log: Log; devices: 
 export type EngineOptions = {
   /** After this long without an appear a pending switch stops suppressing/predicting/restoring (default 3000 ms). */
   pendingTtlMs?: number;
-  /** An expired entry stays an echo tag this long after it was issued (a left-page tag: after the disappear; a superseded tag lives one TTL instead) (default 30000 ms). */
+  /** An expired entry stays an echo tag this long after it was issued (a left-page or superseded tag: after the disappear or the landing that wrote it off) (default 30000 ms). */
   pendingGraceMs?: number;
-  /** Past this many still-expected switches to one device the oldest become echo tags only (default 50). */
+  /** Past this many still-expected switches to one device the oldest become echo tags only; echo tags are bounded likewise, at this many per TTL of the grace period (default 50). */
   maxPendingPerDevice?: number;
-  /** More than this many conflicts in a row (pages reporting two indices) on one device trips the breaker (default 12). */
+  /** Bounds both breakers: more than this many conflicts in a row (pages reporting two indices) on one device, or — children only — more than this many driven sends in a row (sends that followed from a switch) trips it (default 12). */
   drivenSendMax?: number;
   /** Human appears queued before start() (default 20). */
   maxQueuedBeforeStart?: number;
@@ -217,6 +236,8 @@ export class SyncEngine {
   private readonly ttl: number;
   private readonly grace: number;
   private readonly cap: number;
+  /** Echo tags a device may hold: the cap's worth of switches for every TTL of the grace period. */
+  private readonly tagCap: number;
   private readonly drivenMax: number;
   private readonly queueCap: number;
   private readonly log: Log;
@@ -225,6 +246,7 @@ export class SyncEngine {
     this.ttl = options.pendingTtlMs ?? 3000;
     this.grace = Math.max(options.pendingGraceMs ?? 30000, this.ttl);
     this.cap = options.maxPendingPerDevice ?? 50;
+    this.tagCap = Math.ceil((this.cap * this.grace) / this.ttl);
     this.drivenMax = options.drivenSendMax ?? 12;
     this.queueCap = options.maxQueuedBeforeStart ?? 20;
     this.log = deps.log;
@@ -375,13 +397,7 @@ export class SyncEngine {
     const page = ev.pageIndex;
     this.expire(dev); // ageing is lazy: a disappear touches the device too
     dev.visit.delete(page);
-    dev.leaving.add(page);
-    if (dev.leaving.size === 2) {
-      // Two page indices left one page together: a copied anchor with the wrong index, whatever
-      // order the app reports appears in.
-      dev.drivenRun++;
-      this.log.debug(`CONFLICT dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (two page indices left one page together; ${dev.drivenRun}/${this.drivenMax})`);
-    }
+    dev.leaving.add(page); // read at the next appear, once the page the device went to is known
     // A switch to this page still in flight has been overtaken — the device was on the page (it is
     // leaving it) without the switch ever showing — unless the plugin itself explains the departure:
     // a switch to another page queued ahead of it (the app is working through the backlog), or a
@@ -484,19 +500,30 @@ export class SyncEngine {
     const dev = this.device(ev.deviceId);
     this.expire(dev);
     // Visit bookkeeping (the conflicting-anchor breaker, rule 10): a second index reported before
-    // the first one disappeared is a conflict; a disappear group with a single index was a real
-    // page change and ends any run of conflicts.
+    // the first one disappeared is a conflict.
     const conflict = [...dev.visit].some((p) => p !== page);
-    if (dev.leaving.size === 1) dev.drivenRun = 0;
-    // The disappear group that closed the previous visit settles what that visit's send was (rule 10b):
-    // one index left alone — a real page change, so a send that only looked driven because the old
-    // page was still on the visit (appears reported first) was clean; two left together — a page
-    // with two anchors reached by a switch, so its second anchor's send was driven.
-    if (dev.leaving.size > 0) {
-      if (dev.leaving.size === 1 && (dev.cleanPending || dev.drivenPending)) dev.overturnRun = 0;
-      if (dev.leaving.size === 2 && dev.drivenPending) {
-        dev.overturnRun++;
-        this.log.debug(`OVERTURN dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (a second index on a page a switch landed on; ${dev.overturnRun}/${this.drivenMax})`);
+    // The disappear group that closed the previous visit is read now that the page the device went
+    // to is known. The page the device was last known on, left and reported again with nothing
+    // between (a re-emit, below: a folder or a page without an anchor was opened and closed on it),
+    // was never left for another page: it leaves the group. What remains says what the previous
+    // visit was. One index (or none): a real page change, which ends any run of conflicts, and
+    // shows that a send which only looked driven because the old page was still on the visit
+    // (appears reported first) was clean (rule 10b). Two or more left together: a copied anchor
+    // with the wrong index, whatever order the app reports events in — a conflict (rule 10), and a
+    // send made from that page after a switch landed on it was its second anchor's, so driven (10b).
+    const group = dev.leaving.size > 0;
+    if (dev.leftPage === page) dev.leaving.delete(page);
+    if (group) {
+      if (dev.leaving.size <= 1) {
+        dev.drivenRun = 0;
+        if (dev.cleanPending || dev.drivenPending) dev.overturnRun = 0;
+      } else {
+        dev.drivenRun++;
+        this.log.debug(`CONFLICT dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (two page indices left one page together; ${dev.drivenRun}/${this.drivenMax})`);
+        if (dev.drivenPending) {
+          dev.overturnRun++;
+          this.log.debug(`OVERTURN dev=${dev.id} pages=[${[...dev.leaving].join(",")}] (a second index on a page a switch landed on; ${dev.overturnRun}/${this.drivenMax})`);
+        }
       }
       dev.cleanPending = dev.drivenPending = false;
     }
@@ -702,7 +729,7 @@ export class SyncEngine {
         const at = dev.pending.findIndex((p) => p.seq > by.seq);
         dev.pending.splice(at < 0 ? dev.pending.length : at, 0, { ...by, issuedAt: now, expired: "superseded" });
         this.dedupeTags(dev);
-        this.log.debug(`GC dev=${dev.id} page=${by.page} seq=${by.seq} reason=revived (a switch it had superseded showed after all, so it is still queued in the app; kept as an echo tag for ${this.ttl}ms)`);
+        this.log.debug(`GC dev=${dev.id} page=${by.page} seq=${by.seq} reason=revived (a switch it had superseded showed after all, so it is still queued in the app; kept as an echo tag for ${this.grace}ms)`);
       }
     }
     if (!stale) {
@@ -858,22 +885,27 @@ export class SyncEngine {
    * The entry a landing on `page` satisfies. The app applies switches in order, so it is the
    * EARLIEST entry for that page, whatever its state (a tag for the page always precedes a later
    * switch to it) — together with the switches to the same page issued right after it with no
-   * other page between, which can never produce another appear: the newest of that run is the
-   * match (its seq decides staleness: a later switch wins), the rest become superseded tags.
+   * other page between, which can never produce another appear. From an entry still in flight the
+   * newest of that run is the match (its seq decides staleness: a later switch wins) and the rest
+   * become superseded tags. A tag is the match itself: whether the appear is its own late landing
+   * (what stood between it and the run was a person's flip, and the app is still working through
+   * its queue — a superseded tag's match revives the switch that wrote it off) or the run's, cannot
+   * be told, so the run becomes superseded tags too: nothing stays expected on a page the device
+   * may already have been switched to, and nothing is rebroadcast if the app shows it after all.
    * Everything still in flight that was issued BEFORE the match was processed without an appear
    * (the device was already on that page, the page has no anchor, or the app coalesced it) and is
-   * superseded too. Everything issued after it stays in flight: the app may still have it queued.
+   * superseded too. Everything issued after the run stays in flight: the app may still have it queued.
    */
   private consume(dev: DeviceState, page: number): Pending | undefined {
     const first = dev.pending.findIndex((p) => p.page === page);
     if (first < 0) return undefined;
     let last = first;
-    while (last + 1 < dev.pending.length && dev.pending[last + 1].page === page) last++;
-    const [entry] = dev.pending.splice(last, 1);
+    while (last + 1 < dev.pending.length && dev.pending[last + 1].page === page && inFlight(dev.pending[last + 1])) last++;
+    const [entry] = dev.pending.splice(inFlight(dev.pending[first]) ? last : first, 1);
     const now = this.deps.clock.now();
     for (const s of dev.pending.slice(0, last)) {
       if (!inFlight(s)) continue;
-      this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.ttl}ms)`);
+      this.log.debug(`GC dev=${dev.id} page=${s.page} seq=${s.seq} reason=superseded by seq=${entry.seq} (kept as an echo tag for ${this.grace}ms)`);
       s.expired = "superseded";
       s.issuedAt = now;
       s.supersededBy = { seq: entry.seq, page: entry.page, profile: entry.profile, originId: entry.originId, originRole: entry.originRole };
@@ -884,8 +916,9 @@ export class SyncEngine {
 
   /**
    * Ages pending entries. Past the TTL an entry still in flight is marked expired (warn: the
-   * switch was not confirmed) but kept as an echo tag; past the grace period it is dropped, a
-   * superseded tag after one TTL. Never consulted to classify an appear.
+   * switch was not confirmed) but kept as an echo tag; past the grace period (counted from the
+   * issue — for a left-page or superseded tag, from the disappear or the landing that wrote it off)
+   * it is dropped. Never consulted to classify an appear.
    */
   private expire(dev: DeviceState): void {
     if (!dev.pending.length) return;
@@ -893,9 +926,8 @@ export class SyncEngine {
     const keep: Pending[] = [];
     for (const p of dev.pending) {
       const age = now - p.issuedAt;
-      const lifetime = p.expired === "superseded" ? this.ttl : this.grace;
-      if (age > lifetime) {
-        this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=grace-elapsed (${lifetime}ms without an appear)`);
+      if (age > this.grace) {
+        this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=grace-elapsed (${this.grace}ms without an appear)`);
         continue;
       }
       if (inFlight(p) && age > this.ttl) {
@@ -909,21 +941,31 @@ export class SyncEngine {
   }
 
   /**
-   * Expired entries are echo tags only, so one per page suffices: keep the newest. Dropping an
-   * older tag never changes what a landing matches (a page's tag precedes every switch to it still
-   * in flight, and the one kept stands for the same page).
+   * Expired entries are echo tags only, and the app shows a page once per run of switches to it,
+   * so of two tags for the same page with nothing between them the newer suffices. A tag with an
+   * entry for another page between it and the next tag for its page stays: the app will show the
+   * page again after that other page (a backlog), and that landing must find a tag too. Beyond
+   * the cap's worth for every TTL of the grace period the oldest tags are dropped: more than that
+   * within the grace period is beyond what a person produces, and memory stays bounded.
    */
   private dedupeTags(dev: DeviceState): void {
-    const seen = new Set<number>();
-    for (let i = dev.pending.length - 1; i >= 0; i--) {
+    for (let i = dev.pending.length - 2; i >= 0; i--) {
       const p = dev.pending[i];
-      if (inFlight(p)) continue; // a detached entry is still in flight, not a tag: it keeps its place
-      if (seen.has(p.page)) {
-        dev.pending.splice(i, 1);
-        this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=duplicate-tag (a newer tag for the page is kept)`);
-      } else {
-        seen.add(p.page);
+      const next = dev.pending[i + 1];
+      if (inFlight(p) || inFlight(next) || next.page !== p.page) continue; // a detached entry is still in flight, not a tag: it keeps its place
+      dev.pending.splice(i, 1);
+      this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=duplicate-tag (the newer tag for the page right after it is kept)`);
+    }
+    let tags = dev.pending.filter((p) => !inFlight(p)).length;
+    for (let i = 0; tags > this.tagCap; ) {
+      const p = dev.pending[i];
+      if (inFlight(p)) {
+        i++;
+        continue;
       }
+      dev.pending.splice(i, 1);
+      tags--;
+      this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=tag-cap (more than ${this.tagCap} echo tags on this device; the oldest dropped)`);
     }
   }
 

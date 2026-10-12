@@ -247,6 +247,35 @@ describe("setup: scopes, roles, overrides", () => {
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk");
   });
 
+  test("R14-F7 the problems a rejected Save reported stay up while the user works through them; the next Save or a Discard replaces them", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Desk");
+    $("save").click();
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "Scope 'scope-1' ignored: duplicate page pin." }], id: lastSaveId(ws) });
+    const list = "Not saved — fix these and try again:\n• Scope 'scope-1' ignored: duplicate page pin.";
+    expect(status()).toBe(list);
+    setInput(byLabel("Name of scope-1"), "Desk 2"); // the first keystroke of the fix
+    expect(status()).toBe(list);
+    select(byLabel("Role of Deck P"), "parent");
+    expect(status()).toBe(list);
+    $("save").click();
+    expect(status()).toBe("Saving…");
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "still wrong" }], id: lastSaveId(ws) });
+    expect(status()).toBe("Not saved — fix these and try again:\n• still wrong");
+    $("discard").click();
+    expect(status()).toBe("");
+    setInput(byLabel("Name of scope-1"), "Desk 3");
+    expect(status()).toBe("Unsaved changes.");
+    // A rejection answered after a Discard (the draft is clean) is informational: the next edit is an unsaved change like any other.
+    setInput(byLabel("Name of scope-1"), "Desk 4");
+    $("save").click();
+    $("discard").click();
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "late" }], id: lastSaveId(ws) });
+    expect(status()).toBe("The save sent earlier was rejected; the panel shows the last saved configuration:\n• late");
+    setInput(byLabel("Name of scope-1"), "Desk 5");
+    expect(status()).toBe("Unsaved changes.");
+  });
+
   test("no reply to a save is reported after 5 s", () => {
     loadedPanel();
     setInput(byLabel("Name of scope-1"), "Desk");
@@ -480,20 +509,30 @@ describe("setup: scopes, roles, overrides", () => {
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(1);
   });
 
-  test("R10-F9 a Save blocked by a field inside a collapsed scope opens the scope, focuses the field and names it", () => {
+  test("R10-F9/R14-F9 a Save blocked by a field inside a collapsed scope opens the scope, focuses the field and names it", () => {
     const ws = loadedPanel();
     byFocus<HTMLButtonElement>("addov:scope-1").click();
     setInput(byLabel("Parent page (override 1 of scope-1)"), "-1");
-    const section = document.querySelector<HTMLDetailsElement>("details.ds-scope")!;
-    section.open = false;
+    const scope = () => document.querySelector<HTMLDetailsElement>("details.ds-scope")!;
+    scope().open = false;
+    scope().dispatchEvent(new Event("toggle")); // the person collapsed it (jsdom queues the browser's own toggle event; the panel listens for it)
+    select(byLabel("Role of Deck P"), "parent"); // a re-render keeps it collapsed
+    expect(scope().open).toBe(false);
     $("save").click();
     expect(status()).toBe("Fix the highlighted fields first: Parent page (override 1 of scope-1).");
-    expect(document.querySelector<HTMLDetailsElement>("details.ds-scope")!.open).toBe(true);
+    expect(scope().open).toBe(true);
     expect(document.activeElement).toBe(byLabel("Parent page (override 1 of scope-1)"));
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
     setInput(byLabel("Parent page (override 1 of scope-1)"), "1");
-    select(byLabel("Role of Deck P"), "parent"); // a re-render keeps the scope open
-    expect(document.querySelector<HTMLDetailsElement>("details.ds-scope")!.open).toBe(true);
+    select(byLabel("Role of Deck P"), "parent"); // a re-render keeps the scope open: the blocked Save un-collapsed it for good
+    expect(scope().open).toBe(true);
+    // Collapsing and expanding by hand round-trips the same way.
+    scope().open = false;
+    scope().dispatchEvent(new Event("toggle"));
+    scope().open = true;
+    scope().dispatchEvent(new Event("toggle"));
+    select(byLabel("Role of Deck P"), "parent");
+    expect(scope().open).toBe(true);
   });
 
   test("R10-F10 a late load reply with problems does not overwrite 'Saving…' while a save is pending", () => {
@@ -580,6 +619,52 @@ describe("setup: scopes, roles, overrides", () => {
     $("save").click();
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ members: Array<Record<string, unknown>> }> };
     expect(sent.scopes[0].members).toContainEqual({ deviceId: "C1", role: "child", profile: "profiles/xl", pageCount: 7 });
+  });
+
+  test("R14-F8 a profile typed for a device and then discarded, or saved away, does not come back when the device is assigned again", () => {
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }], mapping: { mode: "positional", overrides: [] } }] };
+    const ws = loadedPanel(saved);
+    const assign = (to: string) => select(byLabel("Scope for Deck C1 (disconnected)"), to);
+    assign("scope-1");
+    setInput(byLabel("Profile for Deck C1 (disconnected)"), "profiles/typed-then-discarded");
+    assign(""); // out of the scope: the profile is remembered for its next scope …
+    $("discard").click(); // … until the draft is thrown away
+    assign("scope-1");
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("");
+    setInput(byLabel("Profile for Deck C1 (disconnected)"), "profiles/typed-then-saved-away");
+    assign("");
+    $("save").click(); // saved with C1 in no scope
+    ws.fromPlugin({ event: "globalSettings", settings: saved, issues: [], id: lastSaveId(ws) });
+    assign("scope-1");
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("");
+    $("save").click();
+    const sent = ws.toPlugin("setGlobalSettings").at(-1)!.settings as { scopes: Array<{ members: Array<Record<string, unknown>> }> };
+    expect(sent.scopes[0].members).toContainEqual({ deviceId: "C1", role: "child" });
+    // Within one draft the memory still works (R12-F6).
+    setInput(byLabel("Profile for Deck C1 (disconnected)"), "profiles/kept");
+    assign("");
+    assign("scope-1");
+    expect(byLabel<HTMLInputElement>("Profile for Deck C1 (disconnected)").value).toBe("profiles/kept");
+  });
+
+  test("R14-F10 an override's child device can be changed, and an override is dropped with the member it names", () => {
+    const three = [...DEVICES, { id: "C2", name: "Deck C2", type: 2, isConnected: true }];
+    const saved = { version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };
+    const ws = openPanel();
+    ws.fromPlugin({ event: "devices", devices: three });
+    ws.fromPlugin({ event: "globalSettings", settings: saved, issues: [] });
+    expect(byLabel<HTMLSelectElement>("Child device (override 1 of scope-1)").value).toBe("C1");
+    select(byLabel("Child device (override 1 of scope-1)"), "C2");
+    expect(status()).toBe("Unsaved changes.");
+    $("save").click();
+    const overrides = () => (ws.toPlugin("setGlobalSettings").at(-1)!.settings as { scopes: Array<{ mapping: { overrides: unknown[] } }> }).scopes[0].mapping.overrides;
+    expect(overrides()).toEqual([{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C2", page: 2 } }]);
+    ws.fromPlugin({ event: "globalSettings", settings: { ...saved, scopes: [{ ...saved.scopes[0], mapping: { mode: "positional", overrides: overrides() } }] }, issues: [], id: lastSaveId(ws) });
+    select(byLabel("Scope for Deck C2"), ""); // the override's child leaves the scope: the override goes with it
+    expect(byLabel("Child device (override 1 of scope-1)")).toBeNull();
+    expect(document.querySelector(".ds-scope summary")!.textContent).not.toContain("override");
+    $("save").click();
+    expect(overrides()).toEqual([]);
   });
 
   test("R12-F10 text the browser cannot parse (a bad input with a blank value) stays flagged across a re-render and blocks Save", () => {

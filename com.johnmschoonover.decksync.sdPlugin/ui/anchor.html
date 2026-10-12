@@ -88,6 +88,7 @@
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
       let disconnected = false;               // the socket closed: the disconnect message stays until the panel is reopened
       let saveTimedOut = false;               // the pending Save got no reply in time: edits and Discard behave as if nothing were pending
+      let rejected = false;                   // the last Save was rejected: its list of problems stays up while the user works through it
       const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
       const collapsed = new Set();            // scope ids the user collapsed
       const overrideIds = new WeakMap();      // override object → stable id, so a removed row's invalid text never lands on its successor
@@ -223,10 +224,12 @@
                 draft = clone(saved);
                 dirty = false;
                 invalidText.clear();
+                memberMemory.clear(); // what a device carried out of a scope before this save is not part of what was saved
                 renderSetup();
               }
             } else if (!dirty && pendingSaveId === null) {
               draft = clone(saved); // a reload while nothing is being edited or saved
+              memberMemory.clear();
               applied = true;
               renderSetup();
             }
@@ -243,6 +246,7 @@
             clearSaveTimeout();
             pendingSaveId = null; // the draft stays dirty so the user can fix it
             pendingSave = null;
+            rejected = dirty; // the list of problems is for the edits still in the draft: it stays while they are fixed
             setStatus((dirty
               ? "Not saved — fix these and try again:\n"
               : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []), "err");
@@ -394,6 +398,7 @@
       function markDirty() {
         dirty = true;
         if (disconnected) return; // the disconnect message is the one that matters
+        if (rejected) return; // the problems the plugin reported stay up until the next Save or Discard
         if (pendingSaveId === null || saveTimedOut) setStatus("Unsaved changes.", ""); // "Saving…" stays until the plugin answers
       }
 
@@ -611,6 +616,7 @@
 
       $("addScope").addEventListener("click", change(() => { addScope(); }));
       $("save").addEventListener("click", () => {
+        rejected = false; // whatever this attempt says replaces the last rejection's list
         // An override page box left blank still holds its previous value in the draft; it must be filled in.
         for (const input of $("setup").querySelectorAll('input[data-focus^="ov:"]')) {
           if (input.value.trim() === "") input.setAttribute("aria-invalid", "true");
@@ -658,7 +664,9 @@
       $("discard").addEventListener("click", () => {
         draft = clone(saved);
         dirty = false;
+        rejected = false;
         invalidText.clear();
+        memberMemory.clear(); // a profile or page count typed and then discarded must not come back with the device
         const active = document.activeElement;
         if (active && $("setup").contains(active)) active.blur(); // text being typed is discarded too, not carried across the re-render
         if (pendingSaveId !== null && !saveTimedOut) {

@@ -11,7 +11,7 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 |---|---|
 | One profile per device type | Original/MK.2, XL, Mini, Neo (PRD §7.4). The Stream Deck + is not in that list although PRD §6.6 uses one as the parent (PRD §8.6): if an SD+ will be a scope member, export `profiles/plus` too, register it under `DeviceType 7` and add `7: "profiles/plus"` to `src/profiles.ts` (see below). Any other device type (Studio, Plus XL, …) has no default: set its *Profile* in the configuration UI. |
 | Page count | **5** top-level pages (PRD §10 OQ-2). |
-| Marker placement | **Exactly one Page Anchor per page**, on the top-left key (column 0, row 0). The engine tolerates several anchors on one page (they count as one navigation) but extra anchors waste keys. |
+| Marker placement | **Exactly one Page Anchor per page**, on the top-left key (column 0, row 0). Several anchors with the *same* page index on one page count as one navigation and merely waste keys; anchors with *different* indices on one page each send (manual check C-15) and, copied onto two decks, can trip the conflicting-anchor breaker. |
 | Anchor settings | `{ "pageIndex": N, "enabled": true }` where `N` is the **0-based** index of the page the anchor sits on. The Property Inspector sets these. |
 | Display name | `Deck Sync — <Device>` (PRD §7.4), e.g. `Deck Sync — Original`. |
 | File name | `profiles/<device>.streamDeckProfile` inside the `.sdPlugin` folder. |

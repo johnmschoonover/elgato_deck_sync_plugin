@@ -32,10 +32,10 @@ In this order; the first rule that fires decides.
 | 1 | anchor is inside a multi-action | IGNORED (not a page marker) |
 | 2 | no valid `pageIndex` | IGNORED; warn once per anchor |
 | 3 | `lastKnownPage === page` | IGNORED duplicate (second anchor on the page, editor re-emit); consumes a matching pending entry if one exists |
-| 4 | a pending entry for this page exists — the earliest still-expected one, else the earliest expired one (a reissued switch must match its fresh tag, not a stale tag for the same page, or the fresh entry would dangle) | **RECEIVE** — terminal. Entries issued before it are dropped as superseded (the app showed only the last of rapid switches). If the entry is still expected (not expired), predates the device's own later human navigation, and nothing issued after that navigation is heading for the device, it is **RECEIVE_STALE**: swallowed and the human's last page restored. A late (expired) match is a plain RECEIVE: it may be the human flipping to a page the engine once sent the device to, and fighting that would be worse than one missed sync |
+| 4 | a pending entry for this page exists — the earliest still-expected one, else the earliest expired one (a reissued switch must match its fresh tag, not a stale tag for the same page, or the fresh entry would dangle) | **RECEIVE** — terminal. Entries issued before it are superseded: the app showed only the last of rapid switches, or still has them queued, so they stay echo tags (a still-expected one for one TTL, an expired one for the rest of its grace period) and can never be rebroadcast if the app applies them after all. If the entry is still in flight (expected, or detached by a settings change) (not expired), predates the device's own later human navigation, and nothing issued after that navigation is heading for the device, it is **RECEIVE_STALE**: swallowed and the human's last page restored. A late (expired) match is a plain RECEIVE: it may be the human flipping to a page the engine once sent the device to, and fighting that would be worse than one missed sync |
 | 5 | device not armed | STARTUP: arm, record page, no sync (PRD §4.4) |
-| 6 | engine not started (settings not loaded yet) | IGNORED not-started; the appear is queued for `start()`. The queue keeps the newest 20 (the oldest is dropped with a warning), and a device's queued navigation is discarded when it disconnects. Nothing was in flight before start, so queued navigations never conflicted: `start()` replays only the newest one in each scope (unscoped ones as they are) and, for the earlier ones, just records the device's page (`REPLAY … reason=superseded`, debug) |
-| 7 | device in no scope | IGNORED (recorded as the human's page); warn once per device per settings version |
+| 6 | engine not started (settings not loaded yet) | IGNORED not-started; the appear is queued for `start()`. The queue keeps the newest 20 (the oldest is dropped with a warning), and a device's queued navigation is discarded when it disconnects. Nothing was in flight before start, so queued navigations never conflicted: `start()` replays them in order through these same rules, but a replayed fan-out leaves alone any device whose own later queued navigation is still to come (`SKIP … reason=queued-later`, debug — it is where its own flip left it, and it is never suppressed by a switch the replay itself created), and a page the device had left again before start (`LEAVE … (left before the settings loaded)`, debug) is forgotten after its replay so the next appear there is not read as a duplicate |
+| 7 | device in no scope | IGNORED, recorded as the human's page (so a switch detached by the settings change that unscoped it is stale if it lands later); warn once per device per settings version |
 | 8 | child **and** a parent-issued entry on it is still expected (not expired) | **SUPPRESSED** (parent wins; its switch lands), whatever page the child flipped to — a disabled page included; the navigation is discarded, not recorded |
 | 9 | anchor disabled | IGNORED (recorded as the human's page) |
 | 10 | the appear is *driven* (it follows a RECEIVE on the same page visit) and the device has had more than 12 driven sends in 30 s | IGNORED conflicting-anchors (warn). A page the plugin switched the device to is reporting another index: a copied anchor with the wrong page index. Two such pages on two devices drive each other forever; the breaker stops that. It never fires on ordinary flipping, however fast, in either appear/disappear order (below) |
@@ -81,8 +81,11 @@ uncount a driven send (above). It never touches `armed` or `pending`.
 
 - *Expected* is per target device: a pending entry is expected from the moment it is pushed
   until its appear lands, a later entry on that device lands (superseding it), the switch
-  is rejected, the device disconnects, settings change (it is detached), or the TTL marks
-  it expired. An expired entry is still an echo tag but is no longer expected.
+  is rejected, the device disconnects, settings change (it is detached), the cap turns it
+  into a tag, or the TTL marks it expired. An expired entry is still an echo tag but is no
+  longer expected. A *detached* entry is still in flight for the stale rule below: issued
+  under the old topology, it no longer suppresses or predicts, but if it lands after the
+  device's own later navigation it is undone like any other, until the TTL ages it.
 - *Conflict*: a human appear on a **child** that has an expected entry with origin `parent`.
   The child's navigation is suppressed — no fan-out, not recorded as a send — and the
   parent's switch lands as a normal RECEIVE. Once that switch has landed (or expired) the
@@ -113,13 +116,16 @@ did not know it (its page was unknown after a disappear or reconnect), when the 
 anchor, when the profile is not bundled (the app ignores the request without rejecting it),
 or when the app shows only the last of several rapid switches. Mechanisms, in order of how
 much they do: (1) `already-there` avoids issuing such switches when the page is known;
-(2) causal cleanup — superseding, rejection, disconnect; (3) ageing, evaluated lazily when
-the device is next touched: past `pendingTtlMs` (default 3 s) an entry is marked **expired**
-and logged at warn (`SWITCH unconfirmed …`), past `pendingGraceMs` (default 30 s) it is
-dropped. One expired tag per page is kept (a newer one replaces an older one for the same
-page), and past `maxPendingPerDevice` (50) still-expected entries the oldest become tags too
-(warn), so memory is bounded by the page count plus the cap without ever forgetting that a
-switch was issued — a cap can never turn a landing into a SEND.
+(2) causal cleanup — rejection, disconnect, and superseding, which turns an entry into a tag
+rather than deleting it; (3) ageing, evaluated lazily when the device is next touched: past
+`pendingTtlMs` (default 3 s) an entry in flight is marked **expired** and logged at warn
+(`SWITCH unconfirmed …`), past `pendingGraceMs` (default 30 s) it is dropped, and a
+superseded tag is dropped one TTL after the landing that superseded it. One expired tag per
+page is kept (a newer one replaces an older one for the same page), and past
+`maxPendingPerDevice` (50) still-expected entries the oldest become tags too (warn), so
+memory is bounded by the page count plus the cap without ever forgetting that a switch was
+issued — neither the cap nor a coalesced burst nor a stalled app applying its backlog late
+can turn a landing into a SEND.
 
 An expired entry no longer suppresses a child and no longer counts as where the device will
 be, but it **remains an echo tag**: a landing that arrives later than the TTL (an app stall,
@@ -136,7 +142,12 @@ The bounded cost is the inherent ambiguity of an unconsumed tag, and it has two 
    swallowed once as a RECEIVE (the scope is then out of step until the next flip). Within
    the first 3 s, while the tag is still expected, such a flip can additionally trigger a
    restore if it follows another human navigation on the same device (the deck jumps back
-   once); after the TTL a match is only ever swallowed, never fought.
+   once); after the TTL a match is only ever swallowed, never fought. Superseded entries are
+   tags too (one TTL after the landing that superseded them), so a quick flip to a page the
+   app skipped in a coalesced burst is swallowed as well. The converse ambiguity is not
+   covered: if a human flip was swallowed by a tag and the app then applies that very switch
+   after the human has already left the page again, the landing has no tag and is a SEND
+   (the scope follows the stalled switch); no causal rule can tell it from navigation.
 2. While a **parent-origin** entry on a child is still expected, rule 8 suppresses that
    child's flip to *any* page. If the app coalesces a parent burst (parent 1 → 0 quickly;
    the child, already on 0, shows nothing), the child's tags for 1 and 0 dangle, and a flip
@@ -154,8 +165,10 @@ already-aligned target with an unknown page; hardware checks C-11, C-12 and C-16
 ## Settings changes
 
 Validated settings (from the PI's save or the global-settings event) replace the
-configuration, detach every pending entry (marked expired: their origins belonged to the
-old topology, but they stay echo tags) and keep `armed`/`lastKnownPage`/last send. A reload
+configuration, detach every pending entry (marked `detached`: their origins belonged to the
+old topology, so they neither suppress nor predict, but they stay echo tags and, being
+still in flight, are undone by the stale rule if they land after the device's own later
+navigation, until the TTL ages them) and keep `armed`/`lastKnownPage`/last send. A reload
 that changes nothing is ignored, because the global-settings event also fires for plain
 reads. A switch that lands after a reload is therefore still a RECEIVE. After start, an
 unusable settings payload (not an object, wrong version, or `scopes` not an array) is
@@ -173,16 +186,19 @@ Every line is `EVENT key=value …`; the code is canonical, this is the index.
 
 | Level | Events |
 |---|---|
-| info | `START` (with `queued=n`), `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` (`late=true` after the TTL, `detached=true` after a settings change, `capped=true` for an entry the cap turned into a tag), `RECEIVE_STALE`, `STARTUP`, `SUPPRESSED`, `IGNORED reason=disabled`, `SKIP reason=no-counterpart`, `DEVICE connected` (when it disarms a device), `DEVICE disconnected` (`droppedPending=n`, plus `droppedQueued=n` when pre-start navigation was discarded) |
-| warn (with an actionable clause) | `IGNORED reason=no-scope` (once per device per settings version), `IGNORED reason=no-page-index` (once per anchor), `IGNORED reason=conflicting-anchors`, `SEND … reason=beyond-page-count` (once per device and page: the flipped-to page is beyond the device's configured page count, so nobody can follow), `QUEUE full` (the oldest pre-start navigation dropped), `SKIP reason=disconnected` / `no-profile` / `error`, `SWITCH failed`, `SWITCH unconfirmed` (logged lazily, the next time the engine touches that device at least 3 s after the switch), `GC reason=cap` (more than 50 unconfirmed switches to one device; the oldest become tags only) |
-| debug | `SETTINGS unchanged (update)`, `QUEUED … reason=not-started`, `REPLAY … reason=superseded`, `DRIVEN` (a send right after a receive), `DEVICE connected (already armed)`, `IGNORED reason=duplicate` / `multi-action` / repeated `no-scope` / repeated `no-page-index`, `SKIP reason=already-there`, `SWITCH sent`, `LEAVE` (plain, or `(after the next page appeared; …)` when it uncounts a driven send), `GC reason=superseded` / `grace-elapsed` / `duplicate-tag` |
+| info | `START` (with `queued=n`), `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` / `RECEIVE_STALE` (device, page, seq, origin, scope; `late=true` after the TTL, `detached=true` after a settings change, `capped=true` for an entry the cap turned into a tag, `superseded=true` for one a later landing superseded), `STARTUP`, `SUPPRESSED`, `IGNORED reason=disabled`, `SKIP reason=no-counterpart`, `DEVICE connected` (for a device not yet armed: new, or after a disconnect), `DEVICE disconnected` (`droppedPending=n`, plus `droppedQueued=n` when pre-start navigation was discarded) |
+| warn (with an actionable clause) | `IGNORED reason=no-scope` (once per device per settings version), `IGNORED reason=no-page-index` (once per anchor), `IGNORED reason=conflicting-anchors`, `SEND … reason=beyond-page-count` (once per device and page: the flipped-to page is beyond the device's configured page count, so nobody can follow), `QUEUE full` (the oldest pre-start navigation dropped), `SKIP reason=disconnected` / `no-profile` / `error`, `SWITCH failed`, `SWITCH unconfirmed` (logged lazily, the next time the engine touches that device at least 3 s after the switch), `GC reason=cap` (more than 50 still-expected switches to one device; the oldest become tags only) |
+| debug | `SETTINGS unchanged (update)`, `QUEUED … reason=not-started`, `DRIVEN` (a send right after a receive), `DEVICE connected (already armed)`, `IGNORED reason=duplicate` / `multi-action` / repeated `no-scope` / repeated `no-page-index`, `SKIP reason=already-there` / `queued-later`, `SWITCH sent`, `LEAVE` (plain, `(after the next page appeared; …)` when it uncounts a driven send, or `(left before the settings loaded)` after a replay), `GC reason=superseded` (kept as a tag) / `grace-elapsed` / `duplicate-tag` |
 | error | `UNEXPECTED handler=onAppear …` (caught, never rethrown; the appear is IGNORED with reason=error) |
 
 Under the plugin's `DeckSync` scope (`src/piBridge.ts`, `src/plugin.ts`): `Settings saved:
-n scope(s).` (info), `Settings: …` (warn: a rejected scope and why, an ignored unusable
-payload, no reply to the start-up read; debug: a global-settings event before start),
-`PI: …` (warn when a reply could not be sent; debug when no panel is open or a message is
-unknown), `Startup failed: …` (error).
+n scope(s).` (info); `Settings: …` at warn for a rejected scope and why, a save from the
+panel rejected with n problem(s), a save that could not be written (`Could not save
+settings (…)`), a start-up read that failed (`could not read global settings (…); using
+defaults`), an unusable global-settings payload ignored after start, and no reply to the
+start-up read within 15 s; at debug for a global-settings event before start; `PI: …`
+(warn when a reply could not be sent; debug when no panel is open or a message is
+unknown); `Startup failed: …` (error).
 
 ## What only hardware can confirm
 

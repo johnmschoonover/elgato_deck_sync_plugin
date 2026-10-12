@@ -83,9 +83,13 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    plugin — is it running?" means the plugin did not answer: check it is running, then close
    and reopen the panel; "The plugin did not send its device list" means only the device list
    is missing. "Saved; you have further unsaved changes" means you kept editing while a save
-   was in flight: Save again. **Discard changes** during a save cannot take the save back; the
-   panel adopts what the plugin confirms. "Disconnected from Stream Deck" means the app
-   restarted under the panel: reopen it.
+   was in flight: Save again. "No reply from the plugin — is it running? Try Save again" means
+   the save was not confirmed within 5 s. "Fix the highlighted fields first" means a page
+   count or override page is blank or not a whole number. "Saved settings had problems;
+   invalid scopes were ignored" lists what the plugin dropped from an earlier save (fix and
+   Save). **Discard changes** during a save cannot take the save back; the panel adopts what
+   the plugin confirms. "Disconnected from Stream Deck" means the app restarted under the
+   panel: reopen it.
 4. Flip pages on any deck in the scope; the others follow.
 
 ## Reading the log
@@ -101,7 +105,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000 queued=0` | engine started after connect (`queued`: flips made before the settings loaded, replayed next) |
 | `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s; `detached=true`: issued before a settings change; `capped=true`: one of more than 50 unconfirmed switches) |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s; `detached=true`: issued before a settings change; `capped=true`: one of more than 50 switches still awaiting a landing; `superseded=true`: a later switch had already landed) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
@@ -110,16 +114,16 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped: a page on that device carries a copied anchor with the wrong page index |
 | `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `SEND dev=P page=6 scope=desk reason=beyond-page-count pageCount=5 — …` (warn, once per device and page) | the device flipped to a page its *Pages* setting says it does not have; nobody can follow until *Pages* is raised |
-| `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 unconfirmed switches to one device; the oldest are kept as echo tags only |
-| `QUEUED … reason=not-started`, `REPLAY … reason=superseded`, `DRIVEN …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (the newest per scope is replayed, the others only record the page), a send right after a receive, a reload that changed nothing |
+| `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 switches to one device still awaiting a landing; the oldest are kept as echo tags only |
+| `QUEUED … reason=not-started`, `DRIVEN …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed in order once they have), a send right after a receive, a reload that changed nothing |
 | `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
-| `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
+| `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` / `queued-later` *(debug)* | member skipped, with the fix (`queued-later`: its own flip made before the settings loaded is replayed next) |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
-| `DEVICE connected` (info when it disarms a device, *debug* `(already armed; no change)` otherwise) / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
-| `LEAVE dev=P page=2`, `GC … reason=superseded` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / an old tag was dropped |
+| `DEVICE connected` (info for a device not yet armed: new, or after a disconnect; *debug* `(already armed; no change)` otherwise) / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
+| `LEAVE dev=P page=2`, `GC … reason=superseded` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch a later landing overtook is kept as a tag only / an old tag was dropped |
 | `UNEXPECTED handler=onAppear …` (error) | a bug: the handler threw (caught) — please report it |
-| `Settings saved: n scope(s).` (info), `Settings: …` (warn: a scope rejected and why, no reply to the start-up read; *debug*: an event before start), `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message), `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
+| `Settings saved: n scope(s).` (info); `Settings: …` (warn: a scope rejected and why, `rejected a save … with n problem(s)`, `Could not save settings (…)`, `could not read global settings (…); using defaults`, `ignoring an unusable global-settings payload`, `no reply from Stream Deck within 15000ms`; *debug*: an event before start); `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message); `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
 
 ## Troubleshooting
 
@@ -138,6 +142,10 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   confirmed (`SWITCH unconfirmed` in the log) because the device was already there, the page
   has no Page Anchor, or the profile is not bundled; see
   [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
+- **A child's flip right after a fast parent burst did nothing** — `SUPPRESSED …
+  reason=parent-in-flight`: the parent's switches to that child are still expected (3 s).
+  Flip again after 3 s; manual check C-16 and `docs/SYNC_ENGINE.md` ("The bounded cost")
+  explain the trade-off.
 - **The Property Inspector is unstyled** — it could not load `sdpi.css` from
   `cdn.elgato.com`; everything still works.
 

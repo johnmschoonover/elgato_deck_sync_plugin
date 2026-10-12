@@ -2,6 +2,7 @@ import streamDeck from "@elgato/streamdeck";
 import { PageAnchorAction } from "./actions/page-anchor";
 import { describeError } from "./log";
 import { createGlobalSettingsHandler, loadGlobalSettings, registerPropertyInspectorBridge } from "./piBridge";
+import type { GlobalSettings } from "./settings";
 import { SyncEngine, type DeviceInfo } from "./syncEngine";
 
 const log = streamDeck.logger.createScope("DeckSync");
@@ -34,17 +35,27 @@ streamDeck.devices.onDeviceDidConnect((ev) => engine.onDeviceConnected(ev.device
 streamDeck.devices.onDeviceDidDisconnect((ev) => engine.onDeviceDisconnected(ev.device.id));
 
 // Settings reach the engine validated: from the PI's save, or from the global-settings event.
+// Until start() has finished (settings applied, pre-start navigation replayed) the event is
+// ignored and a save from the PI is held, so neither can interleave with the start-up load.
 let started = false;
+let savedBeforeStart: GlobalSettings | undefined;
 const handleGlobalSettings = createGlobalSettingsHandler(log, engine, () => started);
 streamDeck.settings.onDidReceiveGlobalSettings((ev) => handleGlobalSettings(ev.settings));
-registerPropertyInspectorBridge({ log, onSettingsSaved: (settings) => engine.onSettingsChanged(settings) });
+registerPropertyInspectorBridge({
+  log,
+  onSettingsSaved: (settings) => {
+    if (started) engine.onSettingsChanged(settings);
+    else savedBeforeStart = settings;
+  },
+});
 
 streamDeck
   .connect()
   .then(async () => {
     // Devices are known only after connecting; start never issues a switch.
     const { settings } = await loadGlobalSettings(log);
+    await engine.start(savedBeforeStart ?? settings);
     started = true;
-    await engine.start(settings);
+    if (savedBeforeStart) engine.onSettingsChanged(savedBeforeStart); // a no-op unless it arrived during start()
   })
   .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

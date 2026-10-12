@@ -10,7 +10,7 @@ module.exports = {
   },
   testMatch: ['**/tests/**/*.test.ts'],
   collectCoverage: true,
-  collectCoverageFrom: ['src/**/*.ts', '!src/plugin.ts', '!src/tests/**'],
+  collectCoverageFrom: ['src/**/*.ts', '!src/tests/**'],
   coverageThreshold: {
     global: { statements: 90, branches: 85, functions: 90, lines: 90 },
     './src/syncEngine.ts': { statements: 95, branches: 90, functions: 95, lines: 95 },

@@ -23,8 +23,12 @@ export function logIssues(log: Log, issues: SettingsIssue[]): void {
   for (const issue of issues) log.warn(`Settings: ${issue.message}`);
 }
 
-/** Reads and validates global settings. Problems are logged at warn, never thrown. */
-export async function loadGlobalSettings(log: Log): Promise<ValidatedSettings> {
+/**
+ * Reads and validates global settings. Problems are logged at warn, never thrown — unless
+ * `quiet`: the SDK answers every read with a global-settings event as well, so a read made
+ * on the PI's behalf leaves the logging to that event's handler.
+ */
+export async function loadGlobalSettings(log: Log, quiet = false): Promise<ValidatedSettings> {
   let raw: unknown;
   try {
     raw = await streamDeck.settings.getGlobalSettings();
@@ -32,7 +36,7 @@ export async function loadGlobalSettings(log: Log): Promise<ValidatedSettings> {
     log.warn(`Settings: could not read global settings (${describeError(err)}); using defaults.`);
   }
   const result = validateGlobalSettings(raw);
-  logIssues(log, result.issues);
+  if (!quiet) logIssues(log, result.issues);
   return result;
 }
 
@@ -92,7 +96,7 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
         await send({ event: "devices", devices: listDevices() });
         break;
       case "getGlobalSettings": {
-        const { settings, issues } = await loadGlobalSettings(log);
+        const { settings, issues } = await loadGlobalSettings(log, true); // the PI shows the issues; the event handler logs them
         await send({ event: "globalSettings", settings, issues });
         break;
       }

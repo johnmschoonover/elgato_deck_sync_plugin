@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rollup -c",
+    "build": "rollup -c --failAfterWarnings",
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\"",
     "test": "jest",
     "typecheck": "tsc --noEmit",
@@ -20,6 +20,7 @@
     "@rollup/plugin-typescript": "^11.0.0",
     "@types/jest": "^30.0.0",
     "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.5.2",
     "rollup": "^4.0.0",
     "ts-jest": "^29.4.11",
     "tslib": "^2.6.0",

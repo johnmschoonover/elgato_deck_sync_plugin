@@ -53,7 +53,7 @@
   </div>
   <div class="ds-block" id="setup"></div>
   <div class="ds-block ds-row">
-    <button id="addScope" disabled>Add scope</button>
+    <button id="addScope" data-focus="addScope" disabled>Add scope</button>
     <button id="save" disabled>Save</button>
     <button id="discard">Discard changes</button>
   </div>
@@ -78,8 +78,12 @@
       let actionUuid = null;                  // this action's UUID, from actionInfo
       let saveTimer = null;                   // "no reply" watchdog for Save
       let loaded = false;                     // the first globalSettings reply has arrived
+      let devicesLoaded = false;              // the first devices reply has arrived
       let loadAttempts = 0;                   // initial-load retries
       let loadTimer = null;                   // "no reply" watchdog for the initial load
+      let pendingSave = null;                 // the scopes as sent by Save, to notice edits made meanwhile
+      let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
+      let focusNext = null;                   // where the keyboard focus goes after the next re-render
       const collapsed = new Set();            // scope ids the user collapsed
 
       /* ---------------- Stream Deck plumbing ---------------- */
@@ -102,6 +106,7 @@
         });
         const onDisconnected = () => {
           clearSaveTimeout();
+          if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
           statusWasSaving = false;
           $("save").disabled = true;
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
@@ -112,7 +117,7 @@
           let msg;
           try { msg = JSON.parse(e.data); } catch { return; }
           if (msg.event === "didReceiveSettings") {
-            hydrateMarker((msg.payload && msg.payload.settings) || {});
+            if (!markerEdited) hydrateMarker((msg.payload && msg.payload.settings) || {});
           } else if (msg.event === "sendToPropertyInspector") {
             onPluginMessage(msg.payload || {});
           }
@@ -135,22 +140,29 @@
       }
 
       // The first replies can be dropped if the plugin has not yet seen this panel appear;
-      // ask again a few times before giving up. Save stays disabled until settings arrive.
+      // ask again (for whichever reply is missing) a few times before giving up. Save stays
+      // disabled until settings arrive.
       function requestInitialState() {
-        if (loaded) return;
+        if (loaded && devicesLoaded) return;
         loadAttempts++;
-        toPlugin({ event: "getDevices" });
-        toPlugin({ event: "getGlobalSettings" });
+        if (!devicesLoaded) toPlugin({ event: "getDevices" });
+        if (!loaded) toPlugin({ event: "getGlobalSettings" });
         if (loadTimer) clearTimeout(loadTimer);
         loadTimer = setTimeout(() => {
-          if (loaded) return;
+          loadTimer = null;
+          if (loaded && devicesLoaded) return;
           if (loadAttempts < 3) {
-            setStatus("Waiting for the plugin…", "");
+            if (!loaded) setStatus("Waiting for the plugin…", "");
             requestInitialState();
-          } else {
+          } else if (!loaded) {
             setStatus("No reply from the plugin — is it running? Close and reopen this panel.", "err");
+          } else {
+            setStatus("The plugin did not send its device list — close and reopen this panel to see every device.", "err");
           }
         }, 3000);
+      }
+      function initialStateArrived() {
+        if (loaded && devicesLoaded && loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
       }
 
       function onPluginMessage(payload) {
@@ -159,17 +171,20 @@
             const next = Array.isArray(payload.devices) ? payload.devices : [];
             const changed = JSON.stringify(next) !== JSON.stringify(devices);
             devices = next;
+            devicesLoaded = true;
+            initialStateArrived();
             renderThisDevice();
             if (changed) renderSetup(); // a re-render discards the control being edited
             break;
           }
-          case "globalSettings":
+          case "globalSettings": {
             clearSaveTimeout();
             saved = payload.settings || { version: 2, scopes: [] };
+            let editedMeanwhile = false;
             if (!loaded) {
               // The first load is authoritative: nothing edited before it can be trusted.
               loaded = true;
-              if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+              initialStateArrived();
               $("save").disabled = false;
               $("addScope").disabled = false;
               const discarded = dirty;
@@ -177,18 +192,27 @@
               dirty = false;
               renderSetup();
               setStatus(discarded ? "Configuration loaded; edits made before it arrived were discarded." : "", discarded ? "err" : "");
-            } else if (statusWasSaving || !dirty) {
+            } else if (statusWasSaving) {
+              // Edits made while the plugin was saving stay in the draft, still unsaved.
+              editedMeanwhile = JSON.stringify(draft.scopes) !== pendingSave;
+              if (!editedMeanwhile) {
+                draft = clone(saved);
+                dirty = false;
+                renderSetup();
+              }
+            } else if (!dirty) {
               draft = clone(saved);
-              dirty = false;
               renderSetup();
             }
             if (payload.issues && payload.issues.length) {
               setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
             } else if (statusWasSaving) {
-              setStatus("Saved.", "ok");
+              setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
             }
             statusWasSaving = false;
+            pendingSave = null;
             break;
+          }
           case "globalSettingsRejected":
             clearSaveTimeout();
             statusWasSaving = false; // the draft stays dirty so the user can fix it
@@ -219,6 +243,7 @@
           setStatus("Page index must be a whole number, 0 or more. Not saved.", "err");
           return;
         }
+        markerEdited = true;
         const payload = { enabled: $("enabled").checked };
         if (raw !== "") payload.pageIndex = n;
         if (!send({ event: "setSettings", context: uuid, payload })) {
@@ -351,14 +376,15 @@
         const root = $("setup");
         // Re-rendering replaces every control; put the keyboard focus (and caret) back where it was.
         const active = document.activeElement;
-        const focused = active && active.dataset ? active.dataset.focus : null;
-        const caret = focused && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+        const focused = focusNext || (active && active.dataset ? active.dataset.focus : null);
+        const caret = !focusNext && focused && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+        focusNext = null;
         root.replaceChildren();
         try {
           renderSetupInto(root);
         } finally {
           if (focused) {
-            const again = root.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+            const again = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
             if (again) {
               again.focus();
               if (caret && typeof again.setSelectionRange === "function") {
@@ -390,9 +416,13 @@
           const member = memberOf(id);
           const scopeSelect = el("select", { "aria-label": `Scope for ${deviceName(id)}`, "data-focus": `scope:${id}`, onchange: change((ev) => {
             const v = ev.target.value;
-            if (v === "") removeFromScope(id);
-            else if (v === "__new") assignToScope(id, addScope());
-            else assignToScope(id, draft.scopes.find((s) => s.id === v));
+            const left = scopeOf(id);
+            removeFromScope(id);
+            // A scope this device just emptied has nothing left to say (stepping through the list
+            // with the arrow keys would otherwise leave one empty scope per pass).
+            if (left && left.members.length === 0) draft.scopes = draft.scopes.filter((s) => s !== left);
+            if (v === "__new") assignToScope(id, addScope());
+            else if (v !== "") assignToScope(id, draft.scopes.find((s) => s.id === v));
           }) },
             option("", "— not synced —", !scope),
             ...draft.scopes.map((s) => option(s.id, s.name || s.id, scope && scope.id === s.id)),
@@ -443,7 +473,7 @@
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
           el("input", { type: "text", value: scope.name, "aria-label": "Scope name", "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
-          el("button", { class: "ds-fixed", "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); }) }, "Remove scope")));
+          el("button", { class: "ds-fixed", "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
 
         if (parent && children.length) {
           box.append(el("div", { class: "ds-muted" }, "Overrides pin a parent page to a child page (both directions); other pages map positionally."));
@@ -473,13 +503,17 @@
           el("select", { "aria-label": "Child device", "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
             ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
           el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page", "b"),
-          el("button", { class: "ds-fixed", "aria-label": "Remove override", "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
+          el("button", { class: "ds-fixed", "aria-label": "Remove override", "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); focusNext = `addov:${scope.id}`; }) }, "×"));
       }
 
       /* ---------------- save / discard ---------------- */
 
       $("addScope").addEventListener("click", change(() => { addScope(); }));
       $("save").addEventListener("click", () => {
+        // An override page box left blank still holds its previous value in the draft; it must be filled in.
+        for (const input of $("setup").querySelectorAll('input[data-focus^="ov:"]')) {
+          if (input.value.trim() === "") input.setAttribute("aria-invalid", "true");
+        }
         if ($("setup").querySelector('[aria-invalid="true"]')) {
           setStatus("Fix the highlighted fields first.", "err");
           return;
@@ -497,12 +531,14 @@
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;
         }
+        pendingSave = JSON.stringify(draft.scopes);
         statusWasSaving = true; // the draft stays dirty until the plugin confirms
         setStatus("Saving…", "");
         clearSaveTimeout();
         saveTimer = setTimeout(() => {
           if (!statusWasSaving) return;
           statusWasSaving = false;
+          pendingSave = null;
           setStatus("No reply from the plugin — is it running? Try Save again.", "err");
         }, 5000);
       });

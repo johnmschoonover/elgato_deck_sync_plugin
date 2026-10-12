@@ -25,16 +25,19 @@
  *   after that device's own later human navigation is stale: swallowed, and
  *   the device restored to the human's page — unless a later switch is
  *   already heading there.
- * - Time never classifies an appear. After `pendingTtlMs` an unconfirmed
- *   entry is marked expired: it no longer suppresses a child, counts as where
- *   the device will be, or triggers a restore, but it remains an echo tag,
- *   so a late landing is still a RECEIVE. Expired entries are dropped after
- *   `pendingGraceMs` (bounded memory), when a later switch to the device
- *   lands, or when the device disconnects.
+ * - Time never decides between SEND and RECEIVE. After `pendingTtlMs` an
+ *   unconfirmed entry is marked expired: it no longer suppresses a child,
+ *   counts as where the device will be, or triggers a restore, but it remains
+ *   an echo tag, so a late landing is still a RECEIVE. A fresh entry for the
+ *   same page always matches before an expired one. Expired entries are
+ *   dropped after `pendingGraceMs` (bounded memory), when a later switch to
+ *   the device lands, or when the device disconnects.
  * - A conflicting-anchor breaker: a SEND that follows a RECEIVE on the same
  *   page visit is "driven" — the signature of a copied anchor with the wrong
  *   page index, which can make two decks drive each other forever. Too many
  *   driven sends from one device in a short span are ignored with a warning.
+ *   A flip that only looked driven because the app reported the new page
+ *   before the old page's disappear is uncounted when that disappear arrives.
  */
 import { resolveTargets, toCanonical } from "./mapping";
 import type { Log } from "./log";
@@ -149,6 +152,12 @@ type DeviceState = {
   driven: boolean;
   /** Timestamps of recent driven sends, for the conflicting-anchor breaker. */
   drivenSends: number[];
+  /**
+   * The last driven send's page-before and timestamp. A disappear for that page arriving
+   * afterwards means the device did leave it (the app merely reported the new page first),
+   * so the send is uncounted. Cleared once anything else is issued to the device.
+   */
+  drivenLeave: { page: number; at: number } | null;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -156,7 +165,7 @@ type Plan = IssuedSwitch & { settled: Promise<void> };
 export type EngineSnapshot = {
   seq: number;
   started: boolean;
-  devices: Array<Omit<DeviceState, "pending" | "drivenSends"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
+  devices: Array<Omit<DeviceState, "pending" | "drivenSends" | "drivenLeave"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
 };
 
 const ignored = (reason: IgnoreReason): Outcome => ({ classification: "IGNORED", reason, issued: [], skipped: [] });
@@ -257,7 +266,13 @@ export class SyncEngine {
     dev.lastKnownPage = null; // it may come back on another page
     dev.pending = []; // nothing can land on an absent device
     dev.driven = false;
-    this.log.info(`DEVICE disconnected dev=${deviceId} droppedPending=${dropped}; it is skipped by its scope until it reconnects`);
+    dev.drivenLeave = null;
+    // Navigation queued before start belongs to the connection that just ended: replaying it
+    // would arm the absent device and turn its reconnect burst into sends.
+    const queuedBefore = this.queued.length;
+    this.queued = this.queued.filter((q) => q.deviceId !== deviceId);
+    const droppedQueued = queuedBefore - this.queued.length;
+    this.log.info(`DEVICE disconnected dev=${deviceId} droppedPending=${dropped}${droppedQueued ? ` droppedQueued=${droppedQueued}` : ""}; it is skipped by its scope until it reconnects`);
   }
 
   /** JSON-safe view for tests and diagnostics. */
@@ -265,7 +280,7 @@ export class SyncEngine {
     return {
       seq: this.seq,
       started: this.started,
-      devices: [...this.devices.values()].map(({ drivenSends: _ignored, ...d }) => ({
+      devices: [...this.devices.values()].map(({ drivenSends: _sends, drivenLeave: _leave, ...d }) => ({
         ...d,
         pending: d.pending.map(({ seq, page, profile, originId, originRole, expired }) => ({ seq, page, profile, originId, originRole, expired })),
       })),
@@ -284,6 +299,13 @@ export class SyncEngine {
       dev.lastKnownPage = null;
       dev.driven = false;
       this.log.debug(`LEAVE dev=${dev.id} page=${ev.pageIndex}`);
+    } else if (dev.drivenLeave && dev.drivenLeave.page === ev.pageIndex) {
+      // The device did leave the page it was switched to; the app just reported the new page
+      // first. The send that followed was human after all, not a conflicting anchor.
+      const i = dev.drivenSends.lastIndexOf(dev.drivenLeave.at);
+      if (i >= 0) dev.drivenSends.splice(i, 1);
+      dev.drivenLeave = null;
+      this.log.debug(`LEAVE dev=${dev.id} page=${ev.pageIndex} (after the next page appeared; the send that followed was not driven)`);
     }
   }
 
@@ -331,6 +353,7 @@ export class SyncEngine {
     if (entry) {
       this.arm(dev, page);
       dev.driven = true;
+      dev.drivenLeave = null;
       return this.receive(dev, page, entry);
     }
 
@@ -341,14 +364,20 @@ export class SyncEngine {
       return { classification: "STARTUP", issued: [], skipped: [] };
     }
 
-    // 6. Human navigation before the settings are known: replayed by start().
+    // 6. Human navigation before the settings are known: replayed by start(). The queue keeps
+    //    the newest navigations — the last one decides where everyone ends up.
     if (!this.started) {
-      if (this.queued.length < this.queueCap) this.queued.push(ev);
-      this.log.debug(`QUEUED dev=${dev.id} page=${page} action=${ev.actionId} reason=not-started (replayed once settings are loaded)`);
+      if (this.queued.length >= this.queueCap) {
+        const oldest = this.queued.shift()!;
+        this.log.warn(`QUEUE full dev=${dev.id} page=${page} reason=not-started — more than ${this.queueCap} navigations before the settings loaded; dropped the oldest (dev=${oldest.deviceId} page=${oldest.pageIndex})`);
+      }
+      this.queued.push(ev);
+      this.log.debug(`QUEUED dev=${dev.id} page=${page} action=${ev.actionId} reason=not-started (replayed once the settings are loaded; ${this.queued.length}/${this.queueCap})`);
       return ignored("not-started");
     }
 
     // From here on this is human navigation. Record the physical fact first.
+    const pageBefore = dev.lastKnownPage;
     dev.lastKnownPage = page;
     const wasDriven = dev.driven;
     dev.driven = false;
@@ -391,6 +420,9 @@ export class SyncEngine {
       const now = this.deps.clock.now();
       dev.drivenSends = dev.drivenSends.filter((t) => now - t <= this.drivenWindow);
       dev.drivenSends.push(now);
+      // If the app reports a new page before the old page's disappear, a human flip right after a
+      // RECEIVE looks driven; the disappear of the page it was switched to, arriving next, uncounts it.
+      dev.drivenLeave = { page: pageBefore as number, at: now };
       if (dev.drivenSends.length > this.drivenMax) {
         this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=conflicting-anchors — ${dev.drivenSends.length} sends in ${this.drivenWindow}ms each right after the plugin switched this device; a Page Anchor on its pages reports the wrong page index (fix the anchor's page index)`);
         return ignored("conflicting-anchors");
@@ -434,12 +466,8 @@ export class SyncEngine {
     const restorePage = dev.lastHumanPage as number;
     const seq = ++this.seq;
     this.log.info(`RECEIVE_STALE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId} landed after this device's own navigation seq=${dev.lastHumanSeq}; restoring page=${restorePage} seq=${seq}`);
-    const profile = this.profileFor(dev.id);
-    if (!profile) {
-      this.log.warn(`RESTORE skipped dev=${dev.id} seq=${seq} reason=no-profile — set a profile for this device in the Page Anchor Property Inspector`);
-      return { classification: "RECEIVE_STALE", seq: entry.seq, late, issued: [], skipped: [{ deviceId: dev.id, reason: "no-profile" }] };
-    }
-    const plan = this.issue(dev, profile, restorePage, dev.id, "self", seq);
+    // The device is in the profile the stale switch put it in; the restore stays there.
+    const plan = this.issue(dev, entry.profile, restorePage, dev.id, "self", seq);
     await plan.settled;
     return { classification: "RECEIVE_STALE", seq: entry.seq, late, issued: [toIssued(plan)], skipped: [] };
   }
@@ -530,6 +558,7 @@ export class SyncEngine {
   private issue(target: DeviceState, profile: string, page: number, originId: string, originRole: Origin, seq: number): Plan {
     const entry: Pending = { seq, page, profile, originId, originRole, issuedAt: this.deps.clock.now(), expired: false };
     target.pending.push(entry);
+    target.drivenLeave = null; // a disappear is now expected for another reason; it exonerates nothing
     while (target.pending.length > this.cap) {
       const dropped = target.pending.shift()!;
       this.log.debug(`GC dev=${target.id} page=${dropped.page} seq=${dropped.seq} reason=cap (${this.cap} entries)`);
@@ -548,9 +577,15 @@ export class SyncEngine {
     return { deviceId: target.id, profile, page, seq, settled };
   }
 
-  /** Consumes the earliest pending entry for `page`; entries issued before it were superseded. */
+  /**
+   * Consumes the earliest still-expected entry for `page`, or failing that the earliest expired
+   * one; entries issued before it were superseded. Preferring the fresh entry matters when a
+   * switch to the page was reissued after an earlier one never landed: matching the expired
+   * tag would leave the fresh entry dangling (suppressing a child, predicting a position).
+   */
   private consume(dev: DeviceState, page: number): Pending | undefined {
-    const i = dev.pending.findIndex((p) => p.page === page);
+    let i = dev.pending.findIndex((p) => p.page === page && !p.expired);
+    if (i < 0) i = dev.pending.findIndex((p) => p.page === page);
     if (i < 0) return undefined;
     const superseded = dev.pending.splice(0, i);
     const entry = dev.pending.shift()!;
@@ -582,15 +617,10 @@ export class SyncEngine {
     dev.pending = keep;
   }
 
-  private profileFor(deviceId: string): string | undefined {
-    const member = findScopeForDevice(this.settings, deviceId)?.members.find((m) => m.deviceId === deviceId);
-    return resolveProfile(member?.profile, this.deps.devices.get(deviceId)?.type);
-  }
-
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, disconnected: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, driven: false, drivenSends: [] };
+      dev = { id, armed: false, disconnected: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, driven: false, drivenSends: [], drivenLeave: null };
       this.devices.set(id, dev);
     }
     return dev;

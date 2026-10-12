@@ -14,7 +14,7 @@ folder). Plugin log: `com.johnmschoonover.decksync.sdPlugin/logs/`.
 |---|---|
 | Install / link the plugin, restart Stream Deck. | "Deck Sync" category appears in the actions list with the Page Anchor action and its icon. |
 | Open Preferences → Plugins. | Deck Sync is listed; no warning badge. |
-| Open the log file (`logs/com.johnmschoonover.decksync.0.log`). | No error lines. The `sync` scope shows `START devices=[…] scopes=0`. (`SETTINGS applied (start)` appears only once a scope has been saved; on a fresh install the defaults are "unchanged", logged at debug.) |
+| Open the log file (`logs/com.johnmschoonover.decksync.0.log`). | No error lines. The `sync` scope shows `SETTINGS applied (start) scopes=[] detachedPending=0` followed by `START devices=[…] scopes=0 ttlMs=3000 graceMs=30000 queued=0`. |
 | `npm run validate` on the same build. | "Validation successful". |
 
 ## Gate B — configuration persists (PRD §7.2)
@@ -46,8 +46,11 @@ positional mapping.
 | C-8 | Plug C back in (it shows its last page). | **Nothing moves** on reconnect. Log: C's appears classified as startup/ignored. Then flip P → C follows again. |
 | C-9 | Simultaneously (as close as you can) flip P to page 0 and C to page 3. | Both end on **page 0** (parent wins). No oscillation. |
 | C-10 | Set both devices to *— not synced —* (or click **Remove scope**) and Save. Flip P. | Nothing happens on C. Log: `IGNORED dev=P page=N reason=no-scope — …` once at warn (debug on later flips). Re-create the scope afterwards. |
-| C-11 | Rapid burst: on P press right, right, left, left as fast as possible (0→1→2→1→0). | C ends on page 0. Log: does C show `RECEIVE` lines for the intermediate pages (1, 2, 1) or only `SWITCH unconfirmed` warnings? Record which — it tells us whether the app shows every switch or only the last. |
+| C-11 | Rapid burst: on P press right, right, left, left as fast as possible (0→1→2→1→0). | C ends on page 0. Log: either a `RECEIVE` line on C for every intermediate page (1, 2, 1), or `GC … reason=superseded` debug lines for the ones the app skipped; no `SWITCH unconfirmed` warning. Record which — it tells us whether the app shows every switch or only the last. Also record, for P, whether each `LEAVE dev=P page=N` debug line comes *before* the next page's `SEND` line or carries `(after the next page appeared; …)` — that is the app's appear/disappear order. |
 | C-12 | Put the Mac/PC to sleep for a minute right after flipping P, then wake it. Flip nothing else. | After wake, nothing moves on its own. If a `RECEIVE … late=true` line appears in the log, that is the late echo being absorbed correctly; a `SEND` line without a human flip would be a bug. |
+| C-13 | Open the PI, rename the scope, then flip P and click **Save** within a second. | C still lands on P's page; nothing moves afterwards. Log: `SETTINGS applied (update) … detachedPending=1` (if the save beat the landing) and C's landing as `RECEIVE … detached=true` — never a `SEND` from C. |
+| C-14 | Quit Stream Deck. Relaunch it and flip P the moment the devices light up (before the plugin has loaded its settings). | C follows once the plugin is up, within a few seconds. Log: `QUEUED dev=P … reason=not-started` (debug), then `START … queued=1`, then the `SEND`. If the flip was too early for the plugin to see at all, nothing is logged and C does not follow — that is fine; repeat a little later. |
+| C-15 | On P, copy the page-1 anchor key onto page 2 **without** changing its page index (page 2 now carries anchors saying 1 and 2). Flip P to page 2. | C ends on page **1** (the stray anchor's index overturns the navigation), nothing oscillates, and no `conflicting-anchors` warning appears (that takes a cycle of such pages on both decks). Log: two `SEND` lines for P, pages 2 and 1, the second marked `DRIVEN` at debug. Delete the copied anchor afterwards. |
 
 ## Gate D3 — install → customise → sync
 
@@ -70,6 +73,6 @@ See `docs/SPIKE1.md` for the procedure and the result slot.
 
 ## Results
 
-| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-12 | D3 | Notes |
+| Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-15 | D3 | Notes |
 |---|---|---|---|---|---|---|---|---|
 | | | | | | | | | |

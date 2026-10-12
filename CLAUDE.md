@@ -24,9 +24,12 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 ├── docs/
 │   ├── SYNC_ENGINE.md                       # engine design: classification order, precedence, GC, hardware risks
 │   ├── PROFILES.md                          # bundled-profile authoring contract + manual procedure (D1)
-│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-12, D3)
+│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-15, D3)
 │   └── SPIKE1.md                            # subpage-targeting spike: procedure + result slot
 ├── scripts/make-placeholder-icons.mjs       # regenerates imgs/ at spec sizes (npm run icons)
+├── rollup.config.mjs                        # ESM bundle + emitted bin/package.json; `--failAfterWarnings` in the build script
+├── tsconfig.json / tsconfig.test.json       # strict + native decorators; the test config targets CommonJS for ts-jest
+├── jest.config.cjs                          # ts-jest with diagnostics off (jest does NOT type-check: `npm run typecheck` does), coverage thresholds
 ├── src/
 │   ├── plugin.ts                            # entry: builds the engine over the SDK, registers the action, starts after connect
 │   ├── syncEngine.ts                        # causal send/receive engine, parent precedence, startup guard, fan-out, logging
@@ -37,7 +40,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 │   ├── log.ts                               # logger contract
 │   ├── actions/page-anchor.ts               # the Page Anchor action (SDK event → engine input)
 │   ├── ids.ts                               # plugin/action UUIDs, checked against the manifest by a test
-│   └── tests/                               # Jest: settings, mapping, engine, PI bridge, anchor adapter, profiles, assets
+│   └── tests/                               # Jest: settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log
 └── com.johnmschoonover.decksync.sdPlugin/   # the plugin package
     ├── manifest.json
     ├── imgs/                                # placeholder icons (final art: Epic E4)
@@ -80,7 +83,8 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **Profiles** must be bundled with the plugin and registered in `manifest.json` → `Profiles`; the SDK cannot switch to user-created profiles. Creating valid `.streamDeckProfile` bundles is a hardware task.
 - **No on-disk profile editing.** Communicate only via the official WebSocket API.
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
-- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime (type-only imports of `JsonObject`/`JsonValue` from `@elgato/utils`, a transitive dependency of the SDK, are erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace), never to classify an appear.
+- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime (the type-only import of `JsonObject` from `@elgato/utils`, a transitive dependency of the SDK, is erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) and to bound the conflicting-anchor breaker's window — never to tell a RECEIVE from a SEND.
+- **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket. Add a case there for every behaviour change.
 - **Logs** land in `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored); line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.
 

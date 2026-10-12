@@ -77,10 +77,14 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    - Click **Save**. Problems are shown inline and nothing invalid is saved; **Discard
      changes** returns to the saved configuration.
 
-   The panel's controls stay disabled until the saved configuration has loaded ("Loading the
-   saved configuration…"). "Waiting for the plugin…" or "No reply from the plugin — is it
-   running?" means the plugin did not answer: check it is running, then close and reopen the
-   panel. "Disconnected from Stream Deck" means the app restarted under the panel: reopen it.
+   Until the saved configuration has loaded the device table reads "Loading the saved
+   configuration…" and **Save** / **Add scope** are disabled. "Waiting for the plugin…" or "No
+   reply from the plugin — is it running?" means the plugin did not answer: check it is running,
+   then close and reopen the panel; "The plugin did not send its device list" means only the
+   device list is missing. "Configuration loaded; edits made before it arrived were discarded"
+   means you edited the marker fields before the load finished — redo them. "Saved; you have
+   further unsaved changes" means you kept editing while a save was in flight: Save again.
+   "Disconnected from Stream Deck" means the app restarted under the panel: reopen it.
 4. Flip pages on any deck in the scope; the others follow.
 
 ## Reading the log
@@ -93,23 +97,23 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 
 | Line | Meaning |
 |---|---|
-| `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000` | engine started after connect |
+| `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000 queued=0` | engine started after connect (`queued`: flips made before the settings loaded, replayed next) |
 | `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s) |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s; `detached=true`: issued before a settings change) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
 | `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
 | `IGNORED … reason=no-scope` (warn once per device per saved configuration, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
 | `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped: a page on that device carries a copied anchor with the wrong page index |
+| `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `QUEUED … reason=not-started`, `DRIVEN …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed), a send right after a receive, a reload that changed nothing |
 | `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
 | `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
-| `RESTORE skipped … reason=no-profile` (warn) | a stale switch could not be undone because the device has no profile |
-| `DEVICE connected` / `DEVICE disconnected … droppedPending=n` | device events |
+| `DEVICE connected` / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
 | `LEAVE dev=P page=2`, `GC …` *(debug)* | a page was left / an old tag was dropped |
 | `UNEXPECTED handler=onAppear …` (error) | a bug: the handler threw (caught) — please report it |
 | `Settings saved: n scope(s).` (info), `Settings: …` (warn), `PI: …`, `Startup failed: …` (error) — `DeckSync` scope | configuration saved / a scope rejected and why / Property Inspector delivery / the plugin could not start |
@@ -125,7 +129,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   it elsewhere; `SKIP … disconnected` means the app has not reported the device as connected.
 - **A page flip did nothing once right after a switch** — expected only when the page you
   flipped to is one the plugin had just tried to switch that device to and the switch never
-  confirmed (`SWITCH unconfirmed` in the log); see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
+  confirmed (`SWITCH unconfirmed` in the log) because the device was already there, the page
+  has no Page Anchor, or the profile is not bundled; see
+  [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
 - **The Property Inspector is unstyled** — it could not load `sdpi.css` from
   `cdn.elgato.com`; everything still works.
 
@@ -143,8 +149,8 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 
 ```bash
 npm run typecheck   # tsc --noEmit (strict, native decorators)
-npm run build       # rollup
-npm test            # jest — settings, mapping, engine, PI bridge, anchor adapter, profiles, assets (7 suites, coverage thresholds enforced)
+npm run build       # rollup (fails on any warning)
+npm test            # jest — settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log (coverage thresholds enforced)
 npm run validate    # streamdeck validate
 npm run icons       # regenerate placeholder icons
 ```

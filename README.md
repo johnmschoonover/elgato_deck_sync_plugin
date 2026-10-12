@@ -74,22 +74,30 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
      manifest profile name such as `profiles/original`.
    - *Pages*: how many top-level pages that profile has (default 5).
    - Under the scope, add **overrides** (parent page ↔ child page) where the decks don't line up.
+     An override must involve the parent, both pages must be below the devices' *Pages*
+     counts, a parent page or child page can be pinned only once per child, and changing
+     the parent drops overrides that no longer involve it (shown before you Save).
    - Click **Save**. Problems are shown inline and nothing invalid is saved; **Discard
      changes** returns to the saved configuration.
 
-   Until the saved configuration has loaded the device table reads "Loading the saved
-   configuration…" and **Save** / **Add scope** are disabled (the marker fields above are
-   saved instantly and are never discarded). "Waiting for the plugin…" or "No reply from the
-   plugin — is it running?" means the plugin did not answer: check it is running, then close
-   and reopen the panel; "The plugin did not send its device list" means only the device list
-   is missing. "Saved; you have further unsaved changes" means you kept editing while a save
-   was in flight: Save again. "No reply from the plugin — is it running? Try Save again" means
-   the save was not confirmed within 5 s. "Fix the highlighted fields first" means a page
-   count or override page is blank or not a whole number. "Saved settings had problems;
-   invalid scopes were ignored" lists what the plugin dropped from an earlier save (fix and
-   Save). **Discard changes** during a save cannot take the save back; the panel adopts what
-   the plugin confirms. "Disconnected from Stream Deck" means the app restarted under the
-   panel: reopen it.
+   The marker fields above the setup are saved instantly and never discarded. The setup's
+   status line can read:
+
+   | Message | Meaning |
+   |---|---|
+   | Loading the saved configuration… (table), Waiting for the plugin… | the plugin has not answered yet; **Save** / **Add scope** stay disabled |
+   | No reply from the plugin — is it running? Close and reopen this panel. | three requests went unanswered |
+   | The plugin did not send its device list — … | only the device list is missing; scopes can still be edited |
+   | Unsaved changes. / Saving… | the draft differs from what is saved / a Save is awaiting confirmation |
+   | Saved. / Saved; you have further unsaved changes. | confirmed / confirmed, but you kept editing meanwhile: Save again |
+   | Saving… (the save already sent cannot be discarded) | **Discard changes** during a save; the panel adopts what the plugin confirms |
+   | No reply from the plugin — is it running? Try Save again. | not confirmed within 5 s (a later confirmation is still accepted) |
+   | Not saved — fix these and try again: … | the plugin rejected the save; the reasons follow |
+   | The save sent earlier was rejected; the panel shows the last saved configuration: … | rejected after you discarded the draft |
+   | Fix the highlighted fields first. / Pages must be … / … must be a whole number … | a page count or override page is blank or not a whole number |
+   | Page index must be a whole number, 0 or more. The page index was not saved; Enabled was. | the marker's page index is invalid |
+   | Saved settings had problems; invalid scopes were ignored: … | an earlier save held scopes the plugin dropped: fix and Save |
+   | Disconnected from Stream Deck — close and reopen this panel. | the app restarted under the panel |
 4. Flip pages on any deck in the scope; the others follow.
 
 ## Reading the log
@@ -105,13 +113,14 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000 queued=0` | engine started after connect (`queued`: flips made before the settings loaded, replayed next) |
 | `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed (`late=true`: later than 3 s; `detached=true`: issued before a settings change; `capped=true`: one of more than 50 switches still awaiting a landing; `superseded=true`: a later switch had already landed) |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later switch had already landed) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
+| `ANCHOR updated dev=P action=… page=2→3 enabled=true (no sync)` | a visible anchor's settings were edited; the engine now knows the device is on that page |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
 | `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
 | `IGNORED … reason=no-scope` (warn once per device per saved configuration, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
-| `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped: a page on that device carries a copied anchor with the wrong page index |
+| `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped (13 sends in a row right after the plugin switched that device): a page on it carries a copied anchor with the wrong page index |
 | `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `SEND dev=P page=6 scope=desk reason=beyond-page-count pageCount=5 — …` (warn, once per device and page) | the device flipped to a page its *Pages* setting says it does not have; nobody can follow until *Pages* is raised |
 | `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 switches to one device still awaiting a landing; the oldest are kept as echo tags only |
@@ -138,10 +147,12 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   `SEND … reason=beyond-page-count` warning means the *sending* device's *Pages* is too low;
   `SKIP … disconnected` means the app has not reported the device as connected.
 - **A page flip did nothing once right after a switch** — expected only when the page you
-  flipped to is one the plugin had just tried to switch that device to and the switch never
-  confirmed (`SWITCH unconfirmed` in the log) because the device was already there, the page
-  has no Page Anchor, or the profile is not bundled; see
-  [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
+  flipped to is one the plugin had just tried to switch that device to: the flip is logged as
+  a `RECEIVE` (plain within 3 s, `late=true` after a `SWITCH unconfirmed` warning, or
+  `superseded=true` when a later switch had landed first) instead of a `SEND`, and within the
+  first 3 s the deck can once jump back to its previous page. The switch never showed because
+  the device was already there, the page has no Page Anchor, or the profile is not bundled;
+  see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
 - **A child's flip right after a fast parent burst did nothing** — `SUPPRESSED …
   reason=parent-in-flight`: the parent's switches to that child are still expected (3 s).
   Flip again after 3 s; manual check C-16 and `docs/SYNC_ENGINE.md` ("The bounded cost")
@@ -162,7 +173,8 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 ## Development
 
 ```bash
-npm run typecheck   # tsc --noEmit (strict, native decorators)
+npm run typecheck   # tsc --noEmit (plugin, Node-only) && tsc -p tsconfig.test.json (tests, jsdom)
+npm run watch       # rebuild and restart the plugin on change (needs the Stream Deck app and developer mode)
 npm run build       # rollup (fails on any warning)
 npm test            # jest — settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log, engine purity (coverage thresholds enforced)
 npm run validate    # streamdeck validate

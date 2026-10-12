@@ -28,19 +28,22 @@ visible (`com.johnmschoonover.decksync.sdPlugin/logs/`).
 **Part A — detection.**
 1. On the child's bundled profile, page 0, create a folder and inside it place a Page
    Anchor with *Page index* `9` and *Enabled* **off** (so it never SENDs).
-2. Enter the folder by pressing its key. Expect a log line classifying an appear for
-   `page=9` on that device (IGNORED, disabled). Record whether the appear fired.
-3. Leave the folder. Record whether the page-0 anchor's appear fires again.
+2. Enter the folder by pressing its key. Expect `IGNORED dev=<child> page=9 scope=… reason=disabled`
+   (info) — the appear fired and was classified. Record whether it appeared at all.
+3. Leave the folder. Record whether the page-0 anchor's appear fires again: expect
+   `SEND dev=<child> … page=0 …` (the child led back to page 0; the parent is skipped as
+   `already-there` if it is still on 0, otherwise switched). That SEND is correct, not a bug.
 
 **Part B — driving.**
 0. In the configuration UI set the child's *Pages* to `10` and Save (overrides beyond a
    device's page count are rejected).
 1. Add an override pairing parent page `1` ↔ child page `9` and Save.
 2. Flip the parent to page 1 by hand. Watch the child and the log:
-   - lands inside the folder → **works** (the flat index reaches folder pages; note which
-     index did it: 5? 9? another?);
-   - stays put / switch rejected (warn line) → **doesn't**;
-   - lands on an unexpected top-level page → **partial** (record the mapping observed).
+   - lands inside the folder → **works**: `RECEIVE dev=<child> page=9 …` (the flat index
+     reaches folder pages; note which index did it: 5? 9? another?);
+   - stays put / switch rejected (`SWITCH failed` or `SWITCH unconfirmed … page=9`) → **doesn't**;
+   - lands on an unexpected top-level page → **partial** (record the mapping observed; the
+     landing shows as a `SEND` from the child for that page).
 3. Repeat with override `1 ↔ 5` and `1 ↔ 6` to probe whether folder pages are numbered after
    the top-level pages.
 

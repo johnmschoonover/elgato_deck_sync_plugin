@@ -54,7 +54,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 
 ```bash
 npm ci                 # done automatically by the SessionStart hook in cloud sessions
-npm run typecheck      # tsc --noEmit (strict)
+npm run typecheck      # tsc --noEmit (plugin code, Node-only) && tsc -p tsconfig.test.json (the suites, jsdom) — the only type check of src/tests, since jest runs with diagnostics off
 npm run build          # rollup -c → com.johnmschoonover.decksync.sdPlugin/bin/plugin.js
 npm run validate       # streamdeck validate (official manifest + asset validator)
 npm test               # jest (coverage thresholds enforced)

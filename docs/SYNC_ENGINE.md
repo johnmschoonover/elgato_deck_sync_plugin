@@ -11,12 +11,14 @@ The engine is pure TypeScript; the SDK is injected as `Switcher`, `Clock`, `Log`
 Per device: `armed` (false until its first appear after start or connect; a disconnect
 clears it, a connect event for an armed device changes nothing), `lastKnownPage` (null when
 unknown), `pending` — the switches the engine issued to it that have not landed, in issue
-order, each with an `expired` mark (`false`, `"ttl"`, `"detached"` or `"cap"`) —
-`lastHumanSeq`/`lastHumanPage` (its most recent human navigation: a SEND, or a navigation
-ignored as disabled or unscoped; a suppressed one is discarded), `driven` (its current page
-was set by a RECEIVE and it has not left it), and for the conflicting-anchor breaker its
-recent driven sends plus `drivenLeave` (the page it was switched to before its last driven
-send, so a disappear for that page can uncount the send). Globally: `seq`, which numbers
+order, each with an `expired` mark (`false`, `"ttl"`, `"detached"`, `"cap"` or
+`"superseded"`, the last of which also restarts the entry's clock so it lives one TTL from
+the landing that superseded it) — `lastHumanSeq`/`lastHumanPage` (its most recent human
+navigation: a SEND, or a navigation ignored as disabled or unscoped; a suppressed one is
+discarded), `driven` (its current page was set by a RECEIVE and it has not left it), and for
+the conflicting-anchor breaker `drivenRun` (driven sends in a row) plus `drivenLeave` (the
+page it was switched to before its last driven send, so a disappear for that page can
+uncount the send). Globally: `seq`, which numbers
 human navigations and stale-switch restores, `started`, the pre-start `queued` navigations
 (newest 20), and three once-only sets — anchors already warned about for a missing page
 index (never cleared), devices already warned about as unscoped and device/page pairs
@@ -38,21 +40,33 @@ In this order; the first rule that fires decides.
 | 7 | device in no scope | IGNORED, recorded as the human's page (so a switch detached by the settings change that unscoped it is stale if it lands later); warn once per device per settings version |
 | 8 | child **and** a parent-issued entry on it is still expected (not expired) | **SUPPRESSED** (parent wins; its switch lands), whatever page the child flipped to — a disabled page included; the navigation is discarded, not recorded |
 | 9 | anchor disabled | IGNORED (recorded as the human's page) |
-| 10 | the appear is *driven* (it follows a RECEIVE on the same page visit) and the device has had more than 12 driven sends in 30 s | IGNORED conflicting-anchors (warn). A page the plugin switched the device to is reporting another index: a copied anchor with the wrong page index. Two such pages on two devices drive each other forever; the breaker stops that. It never fires on ordinary flipping, however fast, in either appear/disappear order (below) |
+| 10 | the appear is *driven* (it follows a RECEIVE on the same page visit) and it is the device's 13th driven send in a row | IGNORED conflicting-anchors (warn). A page the plugin switched the device to is reporting another index: a copied anchor with the wrong page index. Two such pages on two devices drive each other forever; the breaker stops that, however slowly the app applies switches, because the run is counted structurally, not within a time window. It never fires on ordinary flipping, however fast, in either appear/disappear order (below) |
 | 11 | otherwise | **SEND** |
 
 *Driven* means: the device's current page was established by a RECEIVE and no disappear has
-been seen for it since. If the app emits a page's appear before the previous page's disappear,
-a human flip made right after a RECEIVE is counted as driven for a moment — and uncounted when
-the disappear of the page it was switched to arrives next (`drivenLeave`), because a device
-that left that page was flipped by a person. A stray anchor never produces that disappear (the
-device stays on the page), and a disappear caused by the plugin moving the device on exonerates
-nothing (anything issued to the device clears `drivenLeave`). So the count is the same in either
-event order; hardware check C-11 records which order the app uses.
+been seen for it since. A run of driven sends ends — the count returns to zero — as soon as
+the device makes a navigation that is not driven, i.e. one that left its page first. If the
+app emits a page's appear before the previous page's disappear, a human flip made right after
+a RECEIVE is counted as driven for a moment — and uncounted when the disappear of the page it
+was switched to arrives next (`drivenLeave`), because a device that left that page was flipped
+by a person. A stray anchor never produces that disappear (the device stays on the page), and
+a disappear caused by the plugin moving the device on exonerates nothing (anything issued to
+the device clears `drivenLeave`). So the count is the same in either event order; hardware
+check C-11 records which order the app uses.
 
 Everything that is not an echo or startup is human (PRD §6.3.2). No rule consults elapsed time
-to tell a RECEIVE from a SEND; the breaker's window only bounds how many driven sends a device
-may make, and expiry only ends suppression and prediction.
+to tell a RECEIVE from a SEND, and none to trip the breaker; expiry only ends suppression and
+prediction.
+
+### Anchor edits
+
+Editing a visible Page Anchor's settings in its Property Inspector (page index or enabled)
+reaches the engine as `onAnchorUpdated`: the device is showing that page, so its page is
+recorded as the new index (or forgotten when the index is cleared), the device is armed, and
+a switch to that index still awaiting a landing counts as landed. Nothing is sent — editing
+is not navigation. The log line is `ANCHOR updated` (info). Without this a corrected or newly
+typed index would be unknown to the engine until the page's next appear, so fan-outs to that
+device could be skipped as already-there or dangle.
 
 `onDisappear` only nulls `lastKnownPage` when the engine still believes the device is on
 that page, so the order of appear(new)/disappear(old) does not matter; otherwise it can only
@@ -133,8 +147,11 @@ sleep/wake, a slow profile switch) is still a RECEIVE (`late=true`) and can neve
 mistaken for human navigation and rebroadcast — the first review of this engine found
 exactly that defect when expiry simply deleted the entry. Time therefore never decides
 whether an appear is an echo; it only ends suppression and prediction. When the same page
-is switched to again while an expired tag for it is still kept, the landing matches the
-fresh entry (rule 4) and the stale tag is dropped as superseded.
+is switched to again while an older tag for it is still kept, the landing matches the fresh
+entry (rule 4) and the older tag is superseded like everything issued before the match: a
+tag for one more TTL, never in flight, so it can neither fight nor outlive the landing that
+replaced it (a detached one would otherwise restore against the person's own return to that
+page).
 
 The bounded cost is the inherent ambiguity of an unconsumed tag, and it has two faces:
 
@@ -165,10 +182,11 @@ already-aligned target with an unknown page; hardware checks C-11, C-12 and C-16
 ## Settings changes
 
 Validated settings (from the PI's save or the global-settings event) replace the
-configuration, detach every pending entry (marked `detached`: their origins belonged to the
-old topology, so they neither suppress nor predict, but they stay echo tags and, being
-still in flight, are undone by the stale rule if they land after the device's own later
-navigation, until the TTL ages them) and keep `armed`/`lastKnownPage`/last send. A reload
+configuration, detach every still-expected pending entry (marked `detached`: their origins
+belonged to the old topology, so they no longer suppress a child, but they stay echo tags
+and, being still in flight, still predict where their device will be and are undone by the
+stale rule if they land after the device's own later navigation, until the TTL ages them;
+already-expired tags keep their mark) and keep `armed`/`lastKnownPage`/last send. A reload
 that changes nothing is ignored, because the global-settings event also fires for plain
 reads. A switch that lands after a reload is therefore still a RECEIVE. After start, an
 unusable settings payload (not an object, wrong version, or `scopes` not an array) is
@@ -178,7 +196,11 @@ because the start-up load applies the settings. A save from the PI that arrives 
 `start()` has finished is held and becomes the start configuration (`SETTINGS applied
 (start)`), then re-applied afterwards as a no-op (`src/plugin.ts`). If Stream Deck never
 answers the start-up read, the plugin starts with defaults after 15 s (warn) and applies
-the settings when the reply finally comes.
+the settings when the reply finally comes — through the event, or, if the reply lands while
+`start()` is still replaying, through the read itself once start has finished. The engine
+counts as started only once the replay has drained: a navigation that arrives while the
+replay awaits the app's acknowledgements joins the queue and is replayed next, under the
+normal rules (so it can be suppressed by a switch the replay genuinely issued before it).
 
 ## Logging
 
@@ -186,7 +208,7 @@ Every line is `EVENT key=value …`; the code is canonical, this is the index.
 
 | Level | Events |
 |---|---|
-| info | `START` (with `queued=n`), `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` / `RECEIVE_STALE` (device, page, seq, origin, scope; `late=true` after the TTL, `detached=true` after a settings change, `capped=true` for an entry the cap turned into a tag, `superseded=true` for one a later landing superseded), `STARTUP`, `SUPPRESSED`, `IGNORED reason=disabled`, `SKIP reason=no-counterpart`, `DEVICE connected` (for a device not yet armed: new, or after a disconnect), `DEVICE disconnected` (`droppedPending=n`, plus `droppedQueued=n` when pre-start navigation was discarded) |
+| info | `START` (with `queued=n`), `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` / `RECEIVE_STALE` (device, page, seq, origin, scope; at most one flag: `late=true` after the TTL, `detached=true` after a settings change — it becomes `late=true` once the TTL has passed —, `capped=true` for an entry the cap turned into a tag, `superseded=true` for one a later landing superseded), `STARTUP`, `SUPPRESSED`, `ANCHOR updated` (a visible anchor's settings edited; page recorded, nothing sent), `IGNORED reason=disabled`, `SKIP reason=no-counterpart`, `DEVICE connected` (for a device not yet armed: new, or after a disconnect), `DEVICE disconnected` (`droppedPending=n`, plus `droppedQueued=n` when pre-start navigation was discarded) |
 | warn (with an actionable clause) | `IGNORED reason=no-scope` (once per device per settings version), `IGNORED reason=no-page-index` (once per anchor), `IGNORED reason=conflicting-anchors`, `SEND … reason=beyond-page-count` (once per device and page: the flipped-to page is beyond the device's configured page count, so nobody can follow), `QUEUE full` (the oldest pre-start navigation dropped), `SKIP reason=disconnected` / `no-profile` / `error`, `SWITCH failed`, `SWITCH unconfirmed` (logged lazily, the next time the engine touches that device at least 3 s after the switch), `GC reason=cap` (more than 50 still-expected switches to one device; the oldest become tags only) |
 | debug | `SETTINGS unchanged (update)`, `QUEUED … reason=not-started`, `DRIVEN` (a send right after a receive), `DEVICE connected (already armed)`, `IGNORED reason=duplicate` / `multi-action` / repeated `no-scope` / repeated `no-page-index`, `SKIP reason=already-there` / `queued-later`, `SWITCH sent`, `LEAVE` (plain, `(after the next page appeared; …)` when it uncounts a driven send, or `(left before the settings loaded)` after a replay), `GC reason=superseded` (kept as a tag) / `grace-elapsed` / `duplicate-tag` |
 | error | `UNEXPECTED handler=onAppear …` (caught, never rethrown; the appear is IGNORED with reason=error) |
@@ -206,7 +228,7 @@ unknown); `Startup failed: …` (error).
 2. Whether a switch to the page a device is already on emits `willAppear`. Handled either way; routine `SWITCH unconfirmed` warnings in the log would mean an anchor is missing or a profile is not bundled.
 2a. `isConnected` comes from `deviceDidConnect`: the SDK lists registration-time devices as not connected until that event arrives, so a flip made before a member's connect event skips it with `SKIP … reason=disconnected`. The arming logic itself does not depend on the order of connect events and appears (a connect for a device that never disconnected, or whose reconnect burst already arrived, does not disarm it).
 2b. Echo latency: a landing later than 3 s is absorbed as a late RECEIVE (manual check C-12); if late echoes are routine, raise `pendingTtlMs`.
-2c. Copied anchors with a wrong page index make a page report two indices; a single one silently overturns a navigation (manual check C-15), a cycle of them trips the conflicting-anchor breaker (warn) once a device has made more than twelve driven sends within 30 s. The fix is always the anchor, not the engine.
+2c. Copied anchors with a wrong page index make a page report two indices; a single one silently overturns a navigation (manual check C-15), a cycle of them trips the conflicting-anchor breaker (warn) once a device has made more than twelve driven sends in a row, however slowly the app applies switches. The fix is always the anchor, not the engine.
 2d. Whether the app emits a new page's appear before or after the old page's disappear. Either order works for sync and for the breaker (a late disappear uncounts the flip it followed); manual check C-11 records the order the app uses.
 2e. Settings saved while a switch is in flight (manual check C-13: the landing is a `RECEIVE … detached=true`, never a send) and navigation before the settings have loaded (C-14: `QUEUED`, then replayed by `START`).
 3. `willDisappear` fires for every left page. If not, "leave to an un-anchored page and come back" is read as a duplicate once; fallback is de-duplicating on action id instead of page.

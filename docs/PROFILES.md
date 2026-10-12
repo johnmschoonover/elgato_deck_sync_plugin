@@ -57,7 +57,10 @@ is *not* bundled under its device type's default name.
    ```
 
    `AutoInstall` defaults to `true` (offered on install, PRD §7.4); leave `Readonly` unset so
-   users can customise button content.
+   users can customise button content. `DontAutoSwitchWhenInstalled` defaults to `false`, so
+   the app switches each device to the bundled profile right after installing it — the
+   intended zero-config path (PRD §8.6); set it to `true` only if gate D3 shows that is
+   unwelcome.
 7. **Verify headless.** `npm run validate` must pass (manifest + referenced files).
 8. **Verify on hardware (D3).** Reinstall the plugin: Stream Deck should prompt to add the
    profiles; they appear under Preferences → Profiles; with two devices in one scope,

@@ -5,343 +5,366 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Page Anchor</title>
   <link rel="stylesheet" href="https://cdn.elgato.com/streamdeck/v1/sdpi.css" />
+  <style>
+    .ds-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .ds-table th, .ds-table td { padding: 3px 4px; text-align: left; vertical-align: middle; }
+    .ds-table th { opacity: .7; font-weight: 500; }
+    .ds-table select, .ds-table input { width: 100%; box-sizing: border-box; min-width: 0; }
+    .ds-muted { opacity: .6; font-size: 11px; }
+    .ds-status { font-size: 11px; margin: 6px 0; white-space: pre-wrap; }
+    .ds-status.ok { color: #6fcf97; }
+    .ds-status.err { color: #eb5757; }
+    .ds-row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+    .ds-row > * { flex: 1; min-width: 0; }
+    .ds-row > button, .ds-row > .ds-fixed { flex: 0 0 auto; }
+    .ds-scope { border: 1px solid rgba(255, 255, 255, .12); border-radius: 4px; padding: 4px 8px; margin: 6px 0; }
+    .ds-scope summary { cursor: pointer; }
+    .ds-page { width: 3.5em !important; }
+    .ds-block { padding: 0 8px; }
+  </style>
 </head>
 <body class="sdpi-wrapper">
 
-  <!-- Enable toggle -->
-  <div class="sdpi-item" id="row-enabled">
+  <div class="sdpi-heading">This marker</div>
+  <div class="sdpi-item">
+    <div class="sdpi-item-label">Page index</div>
+    <input class="sdpi-item-value" id="pageIndex" type="number" min="0" step="1" placeholder="0 = first page" />
+  </div>
+  <div class="sdpi-item">
     <div class="sdpi-item-label">Enabled</div>
     <div class="sdpi-item-value">
-      <input
-        class="sdpi-item-value"
-        id="enabled"
-        type="checkbox"
-      />
-      <label for="enabled"></label>
+      <input id="enabled" type="checkbox" class="sdpi-item-value" />
+      <label for="enabled"><span></span>Sync other devices when this page appears</label>
+    </div>
+  </div>
+  <div class="sdpi-item">
+    <div class="sdpi-item-label"></div>
+    <div class="sdpi-item-value ds-muted">
+      The page index is this page's 0-based position in the profile. Put one anchor on every
+      page you want synced. This marker is on device <span id="thisDevice">…</span>.
     </div>
   </div>
 
-  <!-- Target device dropdown -->
-  <div class="sdpi-item" id="row-device">
-    <div class="sdpi-item-label">Sync device</div>
-    <select class="sdpi-item-value select" id="targetDeviceId">
-      <option value="">All other devices</option>
-    </select>
+  <div class="sdpi-heading">Deck Sync setup (all devices)</div>
+  <div class="ds-block ds-muted">
+    Give each device a scope and a role. A scope has one parent and one or more children;
+    the parent always wins. Pages map positionally (page N → page N) unless you add an override.
   </div>
-
-  <!-- Target profile name -->
-  <div class="sdpi-item" id="row-profile">
-    <div class="sdpi-item-label">Profile name</div>
-    <input
-      class="sdpi-item-value"
-      type="text"
-      id="targetProfile"
-      placeholder="e.g. Deck Sync – Original Page 1"
-    />
+  <div class="ds-block" id="setup"></div>
+  <div class="ds-block ds-row">
+    <button id="addScope">Add scope</button>
+    <button id="save">Save</button>
+    <button id="discard">Discard changes</button>
   </div>
-
-  <details class="sdpi-item">
-    <summary>About profile names</summary>
-    <p style="padding: 8px; font-size: 12px; color: var(--sdpi-color-secondary)">
-      Enter the exact name of a profile bundled with this plugin (case-sensitive).
-      Profiles are visible in Stream Deck → Preferences → Profiles.
-    </p>
-  </details>
-
-  <!-- Scopes Management -->
-  <div class="sdpi-item" id="row-scopes">
-    <div class="sdpi-item-label">Scopes</div>
-    <div class="sdpi-item-value" id="scopes-container">
-      <div>Loading scopes...</div>
-    </div>
-  </div>
-
-  <!-- Roles Management -->
-  <div class="sdpi-item" id="row-roles">
-    <div class="sdpi-item-label">Roles</div>
-    <div class="sdpi-item-value" id="roles-container">
-      <div>Loading roles...</div>
-    </div>
-  </div>
-
-  <!-- Mappings Management -->
-  <div class="sdpi-item" id="row-mappings">
-    <div class="sdpi-item-label">Mappings</div>
-    <div class="sdpi-item-value" id="mappings-container">
-      <div>Loading mappings...</div>
-    </div>
-  </div>
+  <div class="ds-block ds-status" id="status"></div>
 
   <script>
-    const sdpiHandler = (() => {
-      let actionSettings = {};
-      let globalSettings = {};
-      let websocket = null;
+    (() => {
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+      const clone = (v) => JSON.parse(JSON.stringify(v));
+
+      /* ---------------- state ---------------- */
+      let ws = null;
       let uuid = null;
+      let thisDeviceId = null;
+      let devices = [];                      // DeviceSummary[] from the plugin
+      let saved = { version: 2, scopes: [] }; // last settings confirmed by the plugin
+      let draft = clone(saved);               // what the user is editing
+      let dirty = false;                      // draft differs from saved
+      let statusWasSaving = false;            // a Save is awaiting the plugin's reply
 
-      function onOpen() {
-        const regEvent = {
-          event: "registerPropertyInspector",
-          uuid,
-        };
-        websocket.send(JSON.stringify(regEvent));
+      /* ---------------- Stream Deck plumbing ---------------- */
 
-        // Ask the plugin for connected devices.
-        sendToPlugin({ event: "getDevices" });
-        // Ask the plugin for global settings.
-        sendToPlugin({ event: "getGlobalSettings" });
-      }
+      // Stream Deck calls this with the action's saved settings in actionInfo (PRD §8.3).
+      window.connectElgatoStreamDeckSocket = (port, piUuid, registerEvent, _info, actionInfoJson) => {
+        uuid = piUuid;
+        let actionInfo = {};
+        try { actionInfo = JSON.parse(actionInfoJson); } catch { /* leave empty */ }
+        thisDeviceId = actionInfo.device ?? null;
+        hydrateMarker((actionInfo.payload && actionInfo.payload.settings) || {});
+        renderThisDevice();
 
-      function onMessage(e) {
-        const data = JSON.parse(e.data);
-
-        if (data.event === "didReceiveSettings") {
-          actionSettings = data.payload.settings ?? {};
-          applySettings();
-        }
-
-        if (data.event === "sendToPlugin") {
-          const payload = data.payload;
-          if (payload.event === "devicesUpdate") {
-            populateDevices(payload.devices);
-          } else if (payload.event === "globalSettingsUpdate") {
-            globalSettings = payload.settings ?? {};
-            applySettings();
+        ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        ws.addEventListener("open", () => {
+          send({ event: registerEvent, uuid });
+          send({ event: "getSettings", context: uuid });
+          toPlugin({ event: "getDevices" });
+          toPlugin({ event: "getGlobalSettings" });
+        });
+        ws.addEventListener("message", (e) => {
+          let msg;
+          try { msg = JSON.parse(e.data); } catch { return; }
+          if (msg.event === "didReceiveSettings") {
+            hydrateMarker((msg.payload && msg.payload.settings) || {});
+          } else if (msg.event === "sendToPropertyInspector") {
+            onPluginMessage(msg.payload || {});
           }
-        }
-      }
-
-      function applySettings() {
-        document.getElementById("enabled").checked = actionSettings.enabled ?? true;
-        document.getElementById("targetDeviceId").value = actionSettings.targetDeviceId ?? "";
-        document.getElementById("targetProfile").value = actionSettings.targetProfile ?? "";
-
-        // Apply global settings if present
-        if (globalSettings.scopes) {
-          populateScopes(globalSettings.scopes);
-        }
-        if (globalSettings.roles) {
-          populateRoles(globalSettings.roles);
-        }
-        if (globalSettings.mappings) {
-          populateMappings(globalSettings.mappings);
-        }
-      }
-
-      function populateScopes(scopes) {
-        const container = document.getElementById("scopes-container");
-        container.innerHTML = "";
-
-        if (scopes.length === 0) {
-          container.innerHTML = "<div>No scopes configured</div>";
-          return;
-        }
-
-        scopes.forEach((scope, index) => {
-          const scopeDiv = document.createElement("div");
-          scopeDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          scopeDiv.style.padding = "8px 0";
-
-          scopeDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${scope.name}</strong> (${scope.deviceIds.length} devices)
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editScope(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteScope(${index})">Delete</button>
-              </div>
-            </div>
-          `;
-
-          container.appendChild(scopeDiv);
         });
+      };
 
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Scope";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addScope;
-        container.appendChild(addButton);
+      function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
+      function toPlugin(payload) { send({ event: "sendToPlugin", context: uuid, payload }); }
+
+      function onPluginMessage(payload) {
+        switch (payload.event) {
+          case "devices":
+            devices = Array.isArray(payload.devices) ? payload.devices : [];
+            renderThisDevice();
+            renderSetup();
+            break;
+          case "globalSettings":
+            saved = payload.settings || { version: 2, scopes: [] };
+            if (!dirty) draft = clone(saved);
+            renderSetup();
+            if (payload.issues && payload.issues.length) {
+              setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
+            } else if (dirty === false && statusWasSaving) {
+              setStatus("Saved.", "ok");
+            }
+            statusWasSaving = false;
+            break;
+          case "globalSettingsRejected":
+            dirty = true; // keep the user's edits so they can fix them
+            setStatus("Not saved:\n" + issuesText(payload.issues || []), "err");
+            statusWasSaving = false;
+            break;
+        }
       }
 
-      function populateRoles(roles) {
-        const container = document.getElementById("roles-container");
-        container.innerHTML = "";
+      /* ---------------- this marker ---------------- */
 
-        if (roles.length === 0) {
-          container.innerHTML = "<div>No roles configured</div>";
-          return;
-        }
-
-        roles.forEach((role, index) => {
-          const roleDiv = document.createElement("div");
-          roleDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          roleDiv.style.padding = "8px 0";
-
-          roleDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${role.name}</strong>
-                ${role.description ? `<br><small>${role.description}</small>` : ""}
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editRole(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteRole(${index})">Delete</button>
-              </div>
-            </div>
-          `;
-
-          container.appendChild(roleDiv);
-        });
-
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Role";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addRole;
-        container.appendChild(addButton);
+      function hydrateMarker(settings) {
+        const raw = settings.pageIndex;
+        const present = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "");
+        const n = Number(raw);
+        $("pageIndex").value = present && Number.isInteger(n) && n >= 0 ? String(n) : "";
+        $("enabled").checked = settings.enabled !== false;
       }
 
-      function populateMappings(mappings) {
-        const container = document.getElementById("mappings-container");
-        container.innerHTML = "";
+      function saveMarker() {
+        const raw = $("pageIndex").value.trim();
+        const n = Number(raw);
+        const payload = { enabled: $("enabled").checked };
+        if (raw !== "" && Number.isInteger(n) && n >= 0) payload.pageIndex = n;
+        send({ event: "setSettings", context: uuid, payload });
+      }
+      $("pageIndex").addEventListener("input", saveMarker);
+      $("enabled").addEventListener("change", saveMarker);
 
-        if (mappings.length === 0) {
-          container.innerHTML = "<div>No mappings configured</div>";
-          return;
-        }
+      function renderThisDevice() {
+        $("thisDevice").textContent = thisDeviceId ? deviceName(thisDeviceId) : "(unknown)";
+      }
 
-        mappings.forEach((mapping, index) => {
-          const mappingDiv = document.createElement("div");
-          mappingDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          mappingDiv.style.padding = "8px 0";
+      /* ---------------- setup: helpers ---------------- */
 
-          mappingDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${mapping.sourceProfile}</strong> → <strong>${mapping.targetProfile}</strong>
-                <br><small>Scope: ${mapping.scopeId}</small>
-                ${mapping.enabled !== false ? "" : "<br><small style='color: red'>Disabled</small>"}
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editMapping(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteMapping(${index})">Delete</button>
-              </div>
-            </div>
-          `;
+      function deviceName(id) {
+        const d = devices.find((x) => x.id === id);
+        if (!d) return `unknown device ${id}`;
+        return d.isConnected ? d.name : `${d.name} (disconnected)`;
+      }
 
-          container.appendChild(mappingDiv);
-        });
+      function defaultProfile(id) {
+        const d = devices.find((x) => x.id === id);
+        return d && d.defaultProfile ? d.defaultProfile : "";
+      }
 
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Mapping";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addMapping;
-        container.appendChild(addButton);
+      /** Every device the UI should list: known to the app, or referenced by settings. */
+      function allDeviceIds() {
+        const ids = devices.map((d) => d.id);
+        for (const s of draft.scopes) for (const m of s.members) if (!ids.includes(m.deviceId)) ids.push(m.deviceId);
+        return ids;
+      }
+
+      function scopeOf(deviceId) {
+        return draft.scopes.find((s) => s.members.some((m) => m.deviceId === deviceId));
+      }
+
+      function memberOf(deviceId) {
+        const s = scopeOf(deviceId);
+        return s ? s.members.find((m) => m.deviceId === deviceId) : undefined;
+      }
+
+      function newScopeId() {
+        let n = draft.scopes.length + 1;
+        while (draft.scopes.some((s) => s.id === `scope-${n}`)) n++;
+        return `scope-${n}`;
       }
 
       function addScope() {
-        // For now, just alert - in a real implementation this would open a modal
-        alert("Add Scope functionality would be implemented here");
+        const id = newScopeId();
+        draft.scopes.push({ id, name: `Scope ${id.split("-")[1]}`, parentDeviceId: "", members: [], mapping: { mode: "positional", overrides: [] } });
+        return draft.scopes[draft.scopes.length - 1];
       }
 
-      function editScope(index) {
-        alert("Edit Scope functionality would be implemented here");
+      function removeFromScope(deviceId) {
+        const s = scopeOf(deviceId);
+        if (!s) return;
+        s.members = s.members.filter((m) => m.deviceId !== deviceId);
+        s.mapping.overrides = s.mapping.overrides.filter((o) => o.a.deviceId !== deviceId && o.b.deviceId !== deviceId);
+        syncParentId(s);
       }
 
-      function deleteScope(index) {
-        if (confirm("Are you sure you want to delete this scope?")) {
-          alert("Delete Scope functionality would be implemented here");
+      function assignToScope(deviceId, scope) {
+        removeFromScope(deviceId);
+        const hasParent = scope.members.some((m) => m.role === "parent");
+        scope.members.push({ deviceId, role: hasParent ? "child" : "parent" });
+        syncParentId(scope);
+      }
+
+      function setRole(deviceId, role) {
+        const s = scopeOf(deviceId);
+        if (!s) return;
+        if (role === "parent") for (const m of s.members) if (m.role === "parent") m.role = "child";
+        memberOf(deviceId).role = role;
+        syncParentId(s);
+      }
+
+      function syncParentId(scope) {
+        const p = scope.members.find((m) => m.role === "parent");
+        scope.parentDeviceId = p ? p.deviceId : "";
+      }
+
+      function markDirty() {
+        dirty = true;
+        setStatus("Unsaved changes.", "");
+      }
+
+      function change(fn) {
+        return (ev) => { fn(ev); markDirty(); renderSetup(); };
+      }
+
+      /* ---------------- setup: rendering (DOM only, no innerHTML with user text) ---------------- */
+
+      function el(tag, attrs, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          if (k === "class") node.className = v;
+          else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+          else if (v !== undefined && v !== false) node.setAttribute(k, v === true ? "" : v);
         }
+        for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        return node;
       }
 
-      function addRole() {
-        alert("Add Role functionality would be implemented here");
+      function option(value, label, selected) {
+        return el("option", { value, selected: !!selected }, label);
       }
 
-      function editRole(index) {
-        alert("Edit Role functionality would be implemented here");
-      }
-
-      function deleteRole(index) {
-        if (confirm("Are you sure you want to delete this role?")) {
-          alert("Delete Role functionality would be implemented here");
-        }
-      }
-
-      function addMapping() {
-        alert("Add Mapping functionality would be implemented here");
-      }
-
-      function editMapping(index) {
-        alert("Edit Mapping functionality would be implemented here");
-      }
-
-      function deleteMapping(index) {
-        if (confirm("Are you sure you want to delete this mapping?")) {
-          alert("Delete Mapping functionality would be implemented here");
-        }
-      }
-
-      function saveSettings() {
-        actionSettings = {
-          enabled: document.getElementById("enabled").checked,
-          targetDeviceId: document.getElementById("targetDeviceId").value,
-          targetProfile: document.getElementById("targetProfile").value,
-        };
-
-        websocket.send(JSON.stringify({
-          event: "setSettings",
-          context: uuid,
-          payload: actionSettings,
-        }));
-      }
-
-      function sendToPlugin(payload) {
-        websocket.send(JSON.stringify({
-          event: "sendToPlugin",
-          context: uuid,
-          payload,
-        }));
-      }
-
-      function populateDevices(devices) {
-        const select = document.getElementById("targetDeviceId");
-        const current = actionSettings.targetDeviceId ?? "";
-
-        // Remove old device options (keep the "All other devices" default).
-        while (select.options.length > 1) select.remove(1);
-
-        for (const device of devices) {
-          const opt = document.createElement("option");
-          opt.value = device.id;
-          opt.textContent = device.name + (device.isConnected ? "" : " (disconnected)");
-          select.appendChild(opt);
+      function renderSetup() {
+        const root = $("setup");
+        root.replaceChildren();
+        const ids = allDeviceIds();
+        if (!ids.length) {
+          root.append(el("div", { class: "ds-muted" }, "No Stream Deck devices known yet."));
+          return;
         }
 
-        select.value = current;
+        // Device table: device | scope | role | profile
+        const table = el("table", { class: "ds-table" },
+          el("thead", {}, el("tr", {}, el("th", {}, "Device"), el("th", {}, "Scope"), el("th", {}, "Role"), el("th", {}, "Profile"))));
+        const tbody = el("tbody");
+        for (const id of ids) {
+          const scope = scopeOf(id);
+          const member = memberOf(id);
+          const scopeSelect = el("select", { onchange: change((ev) => {
+            const v = ev.target.value;
+            if (v === "") removeFromScope(id);
+            else if (v === "__new") assignToScope(id, addScope());
+            else assignToScope(id, draft.scopes.find((s) => s.id === v));
+          }) },
+            option("", "— not synced —", !scope),
+            ...draft.scopes.map((s) => option(s.id, s.name || s.id, scope && scope.id === s.id)),
+            option("__new", "New scope…", false));
+          const roleSelect = el("select", { disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
+            option("parent", "Parent", member && member.role === "parent"),
+            option("child", "Child", member && member.role === "child"));
+          const profileInput = el("input", {
+            type: "text", disabled: !member,
+            placeholder: defaultProfile(id) || (member ? "required for this device type" : ""),
+            value: member && member.profile ? member.profile : "",
+            oninput: (ev) => { if (member) { member.profile = ev.target.value.trim() || undefined; markDirty(); } },
+          });
+          tbody.append(el("tr", {}, el("td", {}, deviceName(id)), el("td", {}, scopeSelect), el("td", {}, roleSelect), el("td", {}, profileInput)));
+        }
+        table.append(tbody);
+        root.append(table);
+        root.append(el("div", { class: "ds-muted" }, "Profile: a profile bundled with Deck Sync (e.g. profiles/original). Blank uses the default for the device type."));
+
+        // Scopes: name + overrides
+        for (const scope of draft.scopes) root.append(renderScope(scope));
       }
 
-      return {
-        connect(port, propertyInspectorUUID) {
-          uuid = propertyInspectorUUID;
-          websocket = new WebSocket(`ws://127.0.0.1:${port}`);
-          websocket.addEventListener("open", onOpen);
-          websocket.addEventListener("message", onMessage);
+      function renderScope(scope) {
+        const parent = scope.members.find((m) => m.role === "parent");
+        const children = scope.members.filter((m) => m.role === "child");
+        const summaryText = `${scope.name || scope.id}: ` +
+          (parent ? `parent ${deviceName(parent.deviceId)}` : "no parent") +
+          `, ${children.length} child${children.length === 1 ? "" : "ren"}` +
+          (scope.mapping.overrides.length ? `, ${scope.mapping.overrides.length} override(s)` : "");
+        const box = el("details", { class: "ds-scope", open: true }, el("summary", {}, summaryText));
 
-          document.getElementById("enabled").addEventListener("change", saveSettings);
-          document.getElementById("targetDeviceId").addEventListener("change", saveSettings);
-          document.getElementById("targetProfile").addEventListener("input", saveSettings);
-        },
-      };
+        box.append(el("div", { class: "ds-row" },
+          el("span", { class: "ds-fixed ds-muted" }, "Name"),
+          el("input", { type: "text", value: scope.name, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
+          el("button", { class: "ds-fixed", onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); }) }, "Remove scope")));
+
+        if (scope.members.length >= 2) {
+          box.append(el("div", { class: "ds-muted" }, "Overrides (pairs of pages that should show together; positional otherwise):"));
+          scope.mapping.overrides.forEach((o, i) => box.append(renderOverride(scope, o, i)));
+          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", onclick: change(() => {
+            const [a, b] = scope.members;
+            scope.mapping.overrides.push({ a: { deviceId: a.deviceId, page: 0 }, b: { deviceId: b.deviceId, page: 0 } });
+          }) }, "Add override")));
+        } else {
+          box.append(el("div", { class: "ds-muted" }, "Assign at least a parent and one child to this scope."));
+        }
+        return box;
+      }
+
+      function renderOverride(scope, o, index) {
+        const side = (ref) => [
+          el("select", { onchange: change((ev) => { ref.deviceId = ev.target.value; }) },
+            ...scope.members.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === ref.deviceId))),
+          el("span", { class: "ds-fixed ds-muted" }, "page"),
+          el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page),
+            oninput: (ev) => { const n = Number(ev.target.value); if (Number.isInteger(n) && n >= 0) { ref.page = n; markDirty(); } } }),
+        ];
+        return el("div", { class: "ds-row" },
+          ...side(o.a), el("span", { class: "ds-fixed" }, "↔"), ...side(o.b),
+          el("button", { class: "ds-fixed", onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
+      }
+
+      /* ---------------- save / discard ---------------- */
+
+      $("addScope").addEventListener("click", change(() => { addScope(); }));
+      $("save").addEventListener("click", () => {
+        for (const s of draft.scopes) syncParentId(s);
+        statusWasSaving = true;
+        dirty = false;
+        setStatus("Saving…", "");
+        toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } });
+      });
+      $("discard").addEventListener("click", () => {
+        draft = clone(saved);
+        dirty = false;
+        setStatus("", "");
+        renderSetup();
+      });
+
+      function issuesText(issues) {
+        return issues.map((i) => "• " + (i.message || JSON.stringify(i))).join("\n");
+      }
+
+      function setStatus(text, kind) {
+        const s = $("status");
+        s.textContent = text;
+        s.className = "ds-block ds-status" + (kind ? " " + kind : "");
+      }
+
+      renderSetup();
     })();
-
-    // Stream Deck injects connectElgatoStreamDeckSocket into the page.
-    function connectElgatoStreamDeckSocket(port, uuid, _event, _info) {
-      sdpiHandler.connect(port, uuid);
-    }
   </script>
 </body>
 </html>

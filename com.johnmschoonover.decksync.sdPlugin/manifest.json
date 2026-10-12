@@ -21,7 +21,6 @@
     "Version": "24",
     "Debug": "enabled"
   },
-  "PropertyInspectorPath": "ui/propertyInspector.html",
   "Actions": [
     {
       "Name": "Page Anchor",

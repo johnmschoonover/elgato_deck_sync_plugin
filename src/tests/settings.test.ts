@@ -59,6 +59,17 @@ describe("validateGlobalSettings", () => {
     });
   });
 
+  test("a blank parentDeviceId is derived from the parent member", () => {
+    const result = validateGlobalSettings(withScope({ parentDeviceId: "" }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].parentDeviceId).toBe("P");
+  });
+
+  test("a demoted parent reports the missing parent, not the stale parentDeviceId", () => {
+    const result = validateGlobalSettings(withScope({ parentDeviceId: "", members: [{ deviceId: "P", role: "child" }, { deviceId: "C1", role: "child" }] }));
+    expect(result.issues[0].message).toBe("Scope 'desk' ignored: a scope needs exactly one parent; found 0.");
+  });
+
   test("strips unknown fields and blank profiles", () => {
     const { settings } = validateGlobalSettings({
       version: 2,
@@ -86,7 +97,6 @@ describe("validateGlobalSettings", () => {
     ["parentDeviceId is not the parent member", withScope({ parentDeviceId: "C1" })],
     ["unknown role", withScope({ members: [{ deviceId: "P", role: "boss" }, { deviceId: "C1", role: "child" }] })],
     ["device listed twice", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "P", role: "child" }] })],
-    ["missing parentDeviceId", withScope({ parentDeviceId: undefined })],
     ["members not an array", withScope({ members: "P,C1" })],
     ["unknown mapping mode", withScope({ mapping: { mode: "fancy", overrides: [] } })],
     ["override endpoint not a member", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "X", page: 0 } }] } })],

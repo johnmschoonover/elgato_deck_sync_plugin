@@ -137,7 +137,6 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
   if (!isNonEmptyString(raw.id)) return fail("missing 'id'.");
   const id = raw.id;
   const name = isNonEmptyString(raw.name) ? raw.name : id;
-  if (!isNonEmptyString(raw.parentDeviceId)) return fail("missing 'parentDeviceId'.");
   if (!Array.isArray(raw.members)) return fail("'members' must be an array.");
 
   const members: ScopeMember[] = [];
@@ -153,7 +152,11 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
 
   const parents = members.filter((m) => m.role === "parent");
   if (parents.length !== 1) return fail(`a scope needs exactly one parent; found ${parents.length}.`);
-  if (parents[0].deviceId !== raw.parentDeviceId) return fail(`'parentDeviceId' (${raw.parentDeviceId}) is not the parent member (${parents[0].deviceId}).`);
+  // parentDeviceId is derived from the parent member; when present it must agree.
+  const parentDeviceId = parents[0].deviceId;
+  if (isNonEmptyString(raw.parentDeviceId) && raw.parentDeviceId !== parentDeviceId) {
+    return fail(`'parentDeviceId' (${raw.parentDeviceId}) is not the parent member (${parentDeviceId}).`);
+  }
   if (!members.some((m) => m.role === "child")) return fail("a scope needs at least one child.");
 
   const overrides: MappingOverride[] = [];
@@ -186,7 +189,7 @@ function validateScope(raw: unknown, index: number): { scope?: Scope; issues: Se
     }
   }
 
-  return { scope: { id, name, parentDeviceId: raw.parentDeviceId, members, mapping: { mode: "positional", overrides } }, issues };
+  return { scope: { id, name, parentDeviceId, members, mapping: { mode: "positional", overrides } }, issues };
 }
 
 /** The scope a device belongs to, if any. Validated settings list each device at most once. */

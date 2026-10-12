@@ -160,7 +160,7 @@ This is the heart of v1 behavior and **MUST** be implemented exactly:
 }
 ```
 
-Invalid scopes are dropped individually with a warning; the rest are kept (§8.6).
+Invalid scopes are dropped individually with a warning when the settings are loaded; the rest are kept (§8.6). A save from the Property Inspector is rejected as a whole while any issue remains, so the panel can show what to fix.
 
 **Per Page Anchor instance settings:**
 
@@ -277,7 +277,9 @@ No bundled profiles exist. The four hand-written JSON files previously in `profi
 - **Unconfirmed switches stay echo tags.** After 3 s an unconfirmed switch stops suppressing children, stops counting as the device's position and can no longer trigger a restore, but it remains an echo tag until 30 s after it was issued, so a late landing (app stall, sleep/wake) can never be mistaken for human navigation and rebroadcast. The bounded cost: a human navigation to exactly that page within the window is swallowed once — never reverted after the TTL (`docs/SYNC_ENGINE.md`); hardware checks C-11/C-12 in `docs/MANUAL_TESTS.md`.
 - **Stale switches are undone only when nothing later is coming.** A still-expected switch that lands after the device's own later navigation is swallowed and the human's last page restored, unless a switch issued after that navigation (e.g. the parent's) is already heading for the device — then the later switch wins.
 - **Conflicting-anchor breaker.** A send that follows a RECEIVE on the same page visit is "driven" — the signature of a copied anchor reporting the wrong page index on a page the plugin switched the device to. More than 12 driven sends from one device within 30 s are ignored with a warning. Ordinary flipping is never driven: the device leaves the page first, and if the app reports the new page before the old page's disappear, that disappear uncounts the flip when it arrives. So no human navigation is rate-limited in either event order (`docs/SYNC_ENGINE.md`).
-- **Navigation before the settings load is replayed.** Appears that arrive between the plugin connecting and its settings loading are queued (the startup burst still arms devices) and replayed once `start()` has the configuration, so a flip in that window is neither dropped nor misreported as "no scope". The queue keeps the newest 20 flips, and a device's queued flips are discarded if it disconnects before start.
+- **Navigation before the settings load is replayed, newest first.** Appears that arrive between the plugin connecting and its settings loading are queued (the startup burst still arms devices). Nothing was in flight then, so they never conflicted: once `start()` has the configuration the newest flip in each scope leads and the earlier ones only record where their device is — a child's later flip is not suppressed by the parent's earlier one. The queue keeps the newest 20 flips, and a device's queued flips are discarded if it disconnects before start.
+- **A coalesced parent burst can cost a child one flip.** While a parent-issued switch to a child is still expected (3 s), the child's flip to any page is suppressed (§6.3.3). If the app coalesces a quick parent burst so the child never shows the intermediate page, those tags dangle for the TTL and a child flip in that window is lost (the child shows its page, nobody follows, the next flip syncs). The engine cannot tell that case from a switch still being applied; manual check C-16 measures how often it happens and whether `pendingTtlMs` should change.
+- **Unconfirmed switches are bounded by page count, not forgotten.** One expired echo tag per page is kept per device, and past 50 unconfirmed switches to one device the oldest become tags too, so a landing can never be read as navigation however long the app stalls.
 
 ### 8.7 Not yet verified on hardware
 

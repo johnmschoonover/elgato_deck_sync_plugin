@@ -24,7 +24,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 ├── docs/
 │   ├── SYNC_ENGINE.md                       # engine design: classification order, precedence, GC, hardware risks
 │   ├── PROFILES.md                          # bundled-profile authoring contract + manual procedure (D1)
-│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-16, D3)
+│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-17, D3)
 │   └── SPIKE1.md                            # subpage-targeting spike: procedure + result slot
 ├── scripts/make-placeholder-icons.mjs       # regenerates imgs/ at spec sizes (npm run icons)
 ├── rollup.config.mjs                        # ESM bundle + emitted bin/package.json; `--failAfterWarnings` in the build script
@@ -73,7 +73,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 
 1. **No bundled profiles (D1, [gate]).** There is no `profiles/` directory; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
-3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor breaker, pre-start replay, the coalesced-burst cost (manual check C-16) and switches kept as tags (cap, superseded, detached).
+3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor breaker, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
 4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).
 
 ## Conventions
@@ -83,8 +83,8 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **Profiles** must be bundled with the plugin and registered in `manifest.json` → `Profiles`; the SDK cannot switch to user-created profiles. Creating valid `.streamDeckProfile` bundles is a hardware task.
 - **No on-disk profile editing.** Communicate only via the official WebSocket API.
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
-- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (type-only imports such as `JsonObject` in `settings.ts` and `JsonValue` in `piBridge.ts`, from `@elgato/utils`, pinned as a devDependency, are erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) and to bound the conflicting-anchor breaker's window — never to tell a RECEIVE from a SEND.
-- **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket. Add a case there for every behaviour change.
+- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (type-only imports such as `JsonObject` in `settings.ts` and `JsonValue` in `piBridge.ts`, from `@elgato/utils`, pinned as a devDependency, are erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) — never to classify an appear or to trip the conflicting-anchor breaker (its run is counted structurally).
+- **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket (the coverage figure jest reports covers `src/` only, not this script). Add a case there for every behaviour change. Saves carry an `id` the plugin echoes, so the panel never takes a stale or load reply for a confirmation.
 - **Logs** land in `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored); line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.
 

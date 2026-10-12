@@ -984,7 +984,7 @@ describe("review findings", () => {
     expect(await h.cls(h.nav("P", 1))).toBe("SEND");
   });
 
-  test("F26 a duplicate appear consumes a pending entry for the page the device already shows", async () => {
+  test("F26/R11-F1 a duplicate appear stands for a switch to the page the device shows only when that switch is the oldest outstanding", async () => {
     const h = harness();
     await h.boot();
     await h.nav("C1", 3); // P#3
@@ -993,12 +993,130 @@ describe("review findings", () => {
     expect(h.pendingPages("P")).toEqual([0]);
     await h.appear("P", 0); // P lands on 0 → RECEIVE
     await h.nav("C1", 3); // P#3 again; P shows 0
-    await h.nav("C2", 0); // P#0 queued behind it; the app may show only the last: P stays on 0
+    await h.nav("C2", 0); // P#0 queued behind it
     expect(h.pendingPages("P")).toEqual([3, 0]);
-    const out = await h.appear("P", 0, { actionId: "editor-re-emit" });
+    const out = await h.appear("P", 0, { actionId: "editor-re-emit" }); // a re-emit of the page P still shows
     expect(out.reason).toBe("duplicate");
-    expect(h.state("P").pending.map((p) => [p.page, p.expired])).toEqual([[3, "superseded"]]); // the app applies in order and showed only the last: the switch to 3 was coalesced
-    expect(h.log.find("debug", /reason=duplicate \(consumed seq=/)).toHaveLength(1);
+    expect(h.state("P").pending.map((p) => [p.page, p.expired])).toEqual([[3, false], [0, false]]); // the app applies in order: both switches are still to show
+    expect(h.log.find("debug", /reason=duplicate \(a switch to this page waits behind an older one; kept\)/)).toHaveLength(1);
+    expect(await h.nav("P", 3)).toMatchObject({ classification: "RECEIVE", seq: 3 });
+    expect(await h.nav("P", 0)).toMatchObject({ classification: "RECEIVE", seq: 4, issued: [] }); // and do, as echoes
+    // Only once the older switch is gone (here: after the grace period) does a re-emit stand for the no-op switch to the shown page.
+    await h.nav("C1", 3); // P#3 (seq 5)
+    h.clock.advance(1000);
+    await h.nav("C2", 0); // P#0 (seq 6), issued because P is expected on 3
+    h.clock.advance(30_000); // the switch to 3 is forgotten; the one to 0 is a tag
+    expect((await h.appear("P", 0, { actionId: "P-p0-b" })).reason).toBe("duplicate");
+    expect(h.log.find("debug", /reason=duplicate \(consumed seq=6\)/)).toHaveLength(1);
+    expect(h.pendingPages("P")).toEqual([]);
+  });
+
+  test("R11-F1 a re-emit or an anchor edit on the page the device shows never stands for a switch queued behind another: the backlog still lands as echoes", async () => {
+    for (const variant of ["re-emit", "edit"] as const) {
+      const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+      await h.boot();
+      await h.nav("C1", 3); // seq 1: P#3, C2#3
+      await h.nav("C1", 0); // seq 2: P#0, C2#0 — P still shows 0: both switches are queued in the app
+      expect(h.pendingPages("P")).toEqual([3, 0]);
+      if (variant === "re-emit") expect((await h.appear("P", 0, { actionId: "P-p0-again" })).reason).toBe("duplicate");
+      else h.engine.onAnchorUpdated({ deviceId: "P", actionId: "P-p0", pageIndex: 0, enabled: true, isInMultiAction: false });
+      expect(h.state("P").pending.map((p) => [p.page, p.expired])).toEqual([[3, false], [0, false]]); // nothing consumed
+      await h.nav("C2", 3);
+      await h.nav("C2", 0);
+      expect(await h.cls(h.nav("C2", 4))).toBe("SEND"); // seq 3: P#4, C1#4
+      expect(await h.nav("P", 3)).toMatchObject({ classification: "RECEIVE", seq: 1 });
+      expect(await h.nav("P", 0)).toMatchObject({ classification: "RECEIVE", seq: 2, issued: [] }); // never a SEND
+      expect(await h.nav("P", 4)).toMatchObject({ classification: "RECEIVE", seq: 3 });
+      await h.nav("C1", 4);
+      expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([4, 4, 4]); // C2's navigation stands
+      expect(h.log.find("info", /^SEND dev=P/)).toHaveLength(0);
+    }
+  });
+
+  test("R11-F2 one wrong-index anchor per deck, with an app that re-emits a shown page's anchors, is cut off by the overturned-switch breaker and released by a landing", async () => {
+    const run = async (reemit: boolean, hopMs: number) => {
+      const h = harness(deskScope({ mapping: { mode: "positional", overrides: [] } }));
+      await h.boot();
+      // C1's physical page 1 carries an anchor saying 2; C2's physical page 2 carries one saying 1; every other anchor is right.
+      const says = (dev: string, physical: number) => (dev === "C1" && physical === 1 ? 2 : dev === "C2" && physical === 2 ? 1 : physical);
+      const phys: Record<string, number> = { P: 0, C1: 0, C2: 0 };
+      const show = async (dev: string, physical: number) => {
+        if (phys[dev] === physical && !reemit) return; // a switch to the shown page shows nothing …
+        h.leave(dev, says(dev, phys[dev])); // … or re-emits the page's anchors (hardware risk 2)
+        phys[dev] = physical;
+        await h.appear(dev, says(dev, physical));
+      };
+      let applied = 0; // the app applies every switch in order, one hop at a time
+      const drain = async () => {
+        for (let hops = 0; applied < h.sw.calls.length && hops < 400; hops++) {
+          const c = h.sw.calls[applied++];
+          h.clock.advance(hopMs);
+          await show(c.deviceId, c.page);
+        }
+        expect(applied).toBe(h.sw.calls.length);
+      };
+      await show("C1", 1); // the person flips C1 to its page 1, which reports 2
+      await drain();
+      return { h, phys, show, drain, switches: h.sw.calls.length, sends: h.log.find("info", /^SEND /).length, trips: h.log.find("warn", /reason=overturned-switches/).length };
+    };
+    // Without the re-emit the wrong anchors cost one wrong page and stop by themselves.
+    const quiet = await run(false, 200);
+    expect(quiet.switches).toBeLessThanOrEqual(4);
+    expect(quiet.trips).toBe(0);
+    // With it, the decks drive each other, every page reporting a single index, until the breaker cuts a child off.
+    for (const hopMs of [200, 3500]) {
+      const loop = await run(true, hopMs);
+      expect(loop.trips).toBeGreaterThanOrEqual(1);
+      expect(loop.switches).toBeLessThan(120); // not the 400-hop cap
+      expect(loop.h.log.find("info", /^SEND dev=P /)).toHaveLength(0); // the parent only ever lands
+      const tripped = loop.h.log.find("warn", /reason=overturned-switches/)[0].msg.match(/dev=(\w+)/)![1];
+      expect(loop.h.state(tripped).overturnRun).toBeGreaterThan(12);
+      // A landing on the cut-off deck ends its run; a flip to a correctly anchored page then syncs again.
+      await loop.show("P", 0);
+      await loop.drain();
+      expect(loop.h.state(tripped).overturnRun).toBe(0);
+      const before = loop.h.sw.calls.length;
+      await loop.show(tripped, 3);
+      expect(loop.h.sw.calls.length).toBeGreaterThan(before);
+      expect(loop.h.log.find("info", new RegExp(`^SEND dev=${tripped} role=child scope=desk page=3 `))).toHaveLength(1);
+    }
+  });
+
+  test("R11-F7 a dependency that throws inside an anchor edit is caught and logged, never thrown into the SDK", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 1); // C1#1 pending
+    h.clock.now = () => { throw new Error("clock broken"); };
+    expect(() => h.engine.onAnchorUpdated({ deviceId: "C1", actionId: "C1-p1", pageIndex: 1, enabled: true, isInMultiAction: false })).not.toThrow();
+    expect(h.log.find("error", /^UNEXPECTED handler=onAnchorUpdated dev=C1 page=1 error="clock broken"/)).toHaveLength(1);
+  });
+
+  test("R11-F8 the missing-page-index warning is given again once the anchor has been edited", async () => {
+    const h = harness();
+    await h.boot();
+    expect((await h.appear("P", undefined, { actionId: "P-blank" })).reason).toBe("no-page-index");
+    expect((await h.appear("P", undefined, { actionId: "P-blank" })).reason).toBe("no-page-index");
+    expect(h.log.find("warn", /reason=no-page-index/)).toHaveLength(1); // once per anchor …
+    h.engine.onAnchorUpdated({ deviceId: "P", actionId: "P-blank", pageIndex: 2, enabled: true, isInMultiAction: false }); // the person sets it
+    h.engine.onAnchorUpdated({ deviceId: "P", actionId: "P-blank", pageIndex: undefined, enabled: true, isInMultiAction: false }); // … and clears it again
+    expect((await h.appear("P", undefined, { actionId: "P-blank" })).reason).toBe("no-page-index");
+    expect(h.log.find("warn", /reason=no-page-index/)).toHaveLength(2); // … per edit
+  });
+
+  test("R11-F16 a RECEIVE or a STARTUP clears the disabled-only record: a second enabled anchor on the landed page is a duplicate, not a send", async () => {
+    const h = harness();
+    await h.boot();
+    expect((await h.nav("P", 2, { enabled: false })).reason).toBe("disabled"); // the page is recorded by a disabled anchor only
+    await h.nav("C1", 3); // P#3 (seq 2: the disabled navigation took seq 1)
+    expect(await h.nav("P", 3)).toMatchObject({ classification: "RECEIVE", seq: 2 });
+    expect((await h.appear("P", 3, { actionId: "P-p3-b" })).reason).toBe("duplicate"); // not a phantom parent navigation
+    expect(h.log.find("info", /^SEND dev=P/)).toHaveLength(0);
+    expect((await h.nav("P", 4, { enabled: false })).reason).toBe("disabled");
+    h.engine.onDeviceDisconnected("P");
+    h.engine.onDeviceConnected("P");
+    expect(await h.cls(h.appear("P", 4, { actionId: "P-p4-startup" }))).toBe("STARTUP");
+    expect((await h.appear("P", 4, { actionId: "P-p4-b" })).reason).toBe("duplicate");
+    expect(h.log.find("info", /^SEND dev=P/)).toHaveLength(0);
   });
 
   test("R4-F2/R10-F1 a landing on a page with an old tag and a fresh reissue matches the oldest: the app applies switches in order, so the reissue may still show", async () => {
@@ -1200,14 +1318,28 @@ describe("review findings", () => {
     // The superseded tag lives one TTL from the landing that superseded it, not the full grace period.
     const g = harness();
     await g.boot();
-    for (const to of [3, 1]) await g.nav("P", to); // C2#3 seq 1, C2#1 seq 2
-    await g.appear("C2", 1); // coalesced: the app applies in order and showed only the last, so the switch to 3 is superseded
+    await g.nav("P", 3); // C2#3 seq 1
+    g.clock.advance(2000);
+    await g.nav("P", 1); // C2#1 seq 2
+    await g.appear("C2", 1); // coalesced: the app applies in order and showed only the last, so the switch to 3 is superseded — its TTL counted from now, not from its issue (R11-F14)
     expect(g.state("C2").pending.map((p) => [p.page, p.seq, p.expired])).toEqual([[3, 1, "superseded"]]);
     expect(g.log.find("debug", /^GC dev=C2 page=3 seq=1 reason=superseded by seq=2 \(kept as an echo tag for 3000ms\)/)).toHaveLength(1);
-    g.clock.advance(3001);
-    await g.appear("C2", 1, { actionId: "poke" }); // ages C2's tags
+    g.clock.advance(2500);
+    await g.appear("C2", 1, { actionId: "poke" }); // ages C2's tags: 4.5 s after the issue, 2.5 s after the supersede
+    expect(g.pendingPages("C2")).toEqual([3]);
+    g.clock.advance(501);
+    await g.appear("C2", 1, { actionId: "poke" });
     expect(g.pendingPages("C2")).toEqual([]);
     expect(g.log.find("debug", /^GC dev=C2 page=3 seq=1 reason=grace-elapsed \(3000ms without an appear\)/)).toHaveLength(1);
+    const k = harness();
+    await k.boot();
+    await k.nav("P", 3);
+    k.clock.advance(2000);
+    await k.nav("P", 1);
+    await k.appear("C2", 1);
+    k.clock.advance(2500);
+    expect(await k.nav("C2", 3)).toMatchObject({ classification: "RECEIVE", issued: [] }); // the app applies the coalesced switch after all, within the tag's TTL: an echo
+    expect(k.log.find("info", /^RECEIVE dev=C2 page=3 seq=1 origin=P scope=desk superseded=true/)).toHaveLength(1);
   });
 
   test("R6-F7 a device removed from its scope still has its detached switch undone when that lands after its own later flip", async () => {
@@ -1494,6 +1626,7 @@ describe("review findings", () => {
     h.engine.onAnchorUpdated({ deviceId: "C1", actionId: "C1-p0", pageIndex: undefined, enabled: true, isInMultiAction: false }); // the engine no longer knows C1 is on 0
     await h.nav("C2", 2); // seq 1: P#2, C1#0 — C1 is already on 0, so nothing shows
     expect(h.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[0, false]]);
+    h.clock.advance(2000); // (the tag's grace period is counted from the leave below, not from the issue: R11-F15)
     expect(await h.cls(h.nav("C1", 1))).toBe("SEND"); // leaving 0 overtakes the switch to 0 (seq 2)
     expect(h.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[0, "left"]]);
     expect(h.log.find("debug", /^GC dev=C1 page=0 seq=1 reason=left-page .*kept as an echo tag for 30000ms/)).toHaveLength(1);

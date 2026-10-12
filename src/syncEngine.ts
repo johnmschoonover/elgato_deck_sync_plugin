@@ -116,7 +116,7 @@ export type AppearInput = {
 export type DisappearInput = Omit<AppearInput, "enabled">;
 
 export type Classification = "SEND" | "RECEIVE" | "RECEIVE_STALE" | "STARTUP" | "SUPPRESSED" | "IGNORED";
-export type IgnoreReason = "multi-action" | "no-page-index" | "duplicate" | "not-started" | "no-scope" | "disabled" | "conflicting-anchors" | "error";
+export type IgnoreReason = "multi-action" | "no-page-index" | "duplicate" | "not-started" | "no-scope" | "disabled" | "conflicting-anchors" | "overturned-switches" | "error";
 export type SkipReason = "no-counterpart" | "disconnected" | "no-profile" | "already-there" | "queued-later" | "error";
 
 export type IssuedSwitch = { deviceId: string; profile: string; page: number; seq: number };
@@ -179,6 +179,8 @@ type DeviceState = {
   leaving: Set<number>;
   /** Conflicts in a row (a second index appearing on a visit, or two indices leaving together); a real page change resets it. */
   drivenRun: number;
+  /** Sends in a row made while a switch from another deck to a different page of this device had not shown (the overturned-switch breaker). */
+  overturnRun: number;
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
@@ -318,6 +320,7 @@ export class SyncEngine {
     dev.visit.clear();
     dev.leaving.clear();
     dev.drivenRun = 0;
+    dev.overturnRun = 0;
     dev.lastReceivePage = null;
     // Navigation queued before start belongs to the connection that just ended: replaying it
     // would arm the absent device and turn its reconnect burst into sends.
@@ -401,19 +404,30 @@ export class SyncEngine {
    * a switch to that index as landed. Editing is not navigation, so nothing is sent.
    */
   onAnchorUpdated(ev: AppearInput): void {
+    try {
+      this.anchorUpdated(ev);
+    } catch (err) {
+      this.log.error(`UNEXPECTED handler=onAnchorUpdated dev=${ev.deviceId} page=${ev.pageIndex} error="${describeError(err)}"`);
+    }
+  }
+
+  private anchorUpdated(ev: AppearInput): void {
     if (ev.isInMultiAction) return;
     const dev = this.device(ev.deviceId);
     const before = dev.lastKnownPage ?? "none";
     dev.visit.clear();
     dev.lastReceivePage = null;
     dev.disabledOnly = false;
+    dev.overturnRun = 0;
+    this.warnedNoPage.delete(ev.actionId); // an index cleared (or set) later is worth a fresh warning
     if (ev.pageIndex === undefined) {
       dev.lastKnownPage = null;
       this.log.info(`ANCHOR updated dev=${dev.id} action=${ev.actionId} page=${before}→none (page index cleared; the page is unknown until its next appear)`);
       return;
     }
     this.expire(dev);
-    const consumed = this.consume(dev, ev.pageIndex);
+    // The device shows this page: a switch to it is satisfied only if it is the next the app would apply.
+    const consumed = this.nextInLine(dev, ev.pageIndex) ? this.consume(dev, ev.pageIndex) : undefined;
     this.arm(dev, ev.pageIndex);
     dev.visit.add(ev.pageIndex);
     this.log.info(`ANCHOR updated dev=${dev.id} action=${ev.actionId} page=${before}→${ev.pageIndex} enabled=${ev.enabled}${consumed ? ` (consumed seq=${consumed.seq})` : ""} (no sync)`);
@@ -464,9 +478,12 @@ export class SyncEngine {
     //    (A page recorded by a disabled anchor only may still be sent once by an enabled one. A
     //    replayed navigation was de-duplicated when it was queued; the page may have become known
     //    since — through an anchor edit — and the navigation is still owed its fan-out.)
+    //    A switch to this page is satisfied by the re-emit only if it is the next the app would apply:
+    //    behind a switch to another page it is still to show, and the device will come back here.
     if (!replay && dev.lastKnownPage === page && !(ev.enabled && dev.disabledOnly)) {
-      const consumed = this.consume(dev, page);
-      this.log.debug(`IGNORED dev=${dev.id} page=${page} action=${ev.actionId} reason=duplicate${consumed ? ` (consumed seq=${consumed.seq})` : ""}`);
+      const consumed = this.nextInLine(dev, page) ? this.consume(dev, page) : undefined;
+      const queued = !consumed && dev.pending.some((p) => p.page === page && inFlight(p));
+      this.log.debug(`IGNORED dev=${dev.id} page=${page} action=${ev.actionId} reason=duplicate${consumed ? ` (consumed seq=${consumed.seq})` : ""}${queued ? " (a switch to this page waits behind an older one; kept)" : ""}`);
       return ignored("duplicate");
     }
 
@@ -476,6 +493,7 @@ export class SyncEngine {
     if (entry) {
       this.arm(dev, page);
       dev.lastReceivePage = page;
+      dev.overturnRun = 0; // a switch showed: whatever overturned the earlier ones, this device still lands them
       return this.receive(dev, page, entry);
     }
     dev.lastReceivePage = null;
@@ -563,6 +581,27 @@ export class SyncEngine {
       this.recordHuman(dev, page); // still the human's page: a stale switch landing later restores it
       this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=conflicting-anchors — ${dev.drivenRun} conflicts in a row (pages reporting two page indices); a Page Anchor on this device's pages carries the wrong page index (fix the anchor's page index). Sends resume after a page with a single anchor`);
       return ignored("conflicting-anchors");
+    }
+    // 10b. Overturned-switch breaker: the other face of a wrong page index. A send made while a
+    //      switch from another deck to a *different* page of this device has not shown (in flight,
+    //      or expired without an appear) overturns that switch. People do that — a flip while a
+    //      slow switch is landing — but the switch then lands, and the landing ends the run. A page
+    //      whose only anchor reports the wrong index overturns every switch to it and never lands
+    //      anything; two such pages on two decks drive each other forever when the app re-emits the
+    //      anchors of a page a device already shows (hardware risk 2), every page reporting a
+    //      single index, out of the conflict breaker's sight. A run of overturning sends with no
+    //      landing between is cut off the same way; a send with nothing outstanding ends the run.
+    const overturned = dev.pending.find((p) => p.originId !== dev.id && p.page !== page && (inFlight(p) || p.expired === "ttl"));
+    if (overturned) {
+      dev.overturnRun++;
+      this.log.debug(`OVERTURN dev=${dev.id} page=${page} outstanding=[page=${overturned.page} seq=${overturned.seq} origin=${overturned.originId}] action=${ev.actionId} (a send while another deck's switch to this device has not shown; ${dev.overturnRun}/${this.drivenMax})`);
+    } else {
+      dev.overturnRun = 0;
+    }
+    if (dev.overturnRun > this.drivenMax) {
+      this.recordHuman(dev, page);
+      this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=overturned-switches — ${dev.overturnRun} sends in a row while a switch from another deck to this device never showed; a page on this device reports the wrong page index, or has no Page Anchor (fix the anchor). Sends resume once a switch lands here, or after a flip made with nothing outstanding`);
+      return ignored("overturned-switches");
     }
 
     // 11. SEND.
@@ -733,17 +772,16 @@ export class SyncEngine {
   }
 
   /**
-   * Consumes the latest in-flight entry for `page`, or failing that the latest tag for it. The
-   * latest, because a landing on a page satisfies every switch to that page issued so far (a
-   * switch to the page the device already shows never produces another appear, so an earlier
-   * entry left behind would dangle: suppressing a child, predicting a position), and because an
-   * old tag for the page must not be matched while a fresh switch to it is still expected.
-   * Earlier entries for the same page are superseded — a landing satisfies every switch to that
-   * page, and an older entry for it must not fight or outlive the landing that replaced it — and
-   * become echo tags for one TTL from now, never in flight again, yet still recognised if the
-   * app applies them after all. Earlier entries for other pages stay in flight: the app may still
-   * have them queued, and until they land (or expire) they keep suppressing and predicting.
+   * Whether an appear for the page the device already shows (a re-emit, or an anchor edit) can
+   * stand for the landing of a switch to that page: only when that switch is the oldest the engine
+   * still remembers for the device — the app applies switches in order, so an older switch to
+   * another page, however stale, would show first, and the device would come back to this page
+   * later, with an appear that must still find its entry. Otherwise the switch stays expected.
    */
+  private nextInLine(dev: DeviceState, page: number): boolean {
+    return dev.pending.length > 0 && dev.pending[0].page === page;
+  }
+
   /**
    * The entry a landing on `page` satisfies. The app applies switches in order, so it is the
    * EARLIEST entry for that page, whatever its state (a tag for the page always precedes a later
@@ -819,7 +857,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0 };
+      dev = { id, armed: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, lastReceivePage: null, disabledOnly: false, visit: new Set(), leaving: new Set(), drivenRun: 0, overturnRun: 0 };
       this.devices.set(id, dev);
     }
     return dev;

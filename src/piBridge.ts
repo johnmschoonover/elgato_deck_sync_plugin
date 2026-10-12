@@ -97,6 +97,12 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
   streamDeck.ui.onSendToPlugin(async (ev) => {
     const p = ev.payload;
     if (typeof p !== "object" || p === null || Array.isArray(p) || typeof p.event !== "string") return;
+    // Replies go to the Property Inspector open now (the SDK offers no other address): if the person
+    // selected another Page Anchor meanwhile, the panel that asked reports no reply although the
+    // request was handled.
+    const from = ev.action?.id;
+    const open = streamDeck.ui.action?.id;
+    if (from && open && from !== open) log.debug(`PI: '${p.event}' came from action ${from}; the reply goes to the panel now open (action ${open})`);
     switch (p.event) {
       case "getDevices":
         await send({ event: "devices", devices: listDevices() });

@@ -86,6 +86,8 @@
       let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
       let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
+      let disconnected = false;               // the socket closed: the disconnect message stays until the panel is reopened
+      let saveTimedOut = false;               // the pending Save got no reply in time: edits and Discard behave as if nothing were pending
       const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
       const collapsed = new Set();            // scope ids the user collapsed
       const overrideIds = new WeakMap();      // override object → stable id, so a removed row's invalid text never lands on its successor
@@ -114,7 +116,9 @@
           clearSaveTimeout();
           if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
           pendingSaveId = null;
+          disconnected = true;
           $("save").disabled = true;
+          $("addScope").disabled = true;
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
         };
         ws.addEventListener("close", onDisconnected);
@@ -359,7 +363,8 @@
 
       function markDirty() {
         dirty = true;
-        if (pendingSaveId === null) setStatus("Unsaved changes.", ""); // "Saving…" stays until the plugin answers
+        if (disconnected) return; // the disconnect message is the one that matters
+        if (pendingSaveId === null || saveTimedOut) setStatus("Unsaved changes.", ""); // "Saving…" stays until the plugin answers
       }
 
       function change(fn) {
@@ -383,8 +388,12 @@
         return el("option", { value, selected: !!selected }, label);
       }
 
-      /** Marks a number box invalid (with a message) or valid; returns the parsed value or undefined. */
-      function readNumber(input, min, message) {
+      /**
+       * Marks a number box invalid (with a message) or valid; returns the parsed value or undefined.
+       * A blank is mid-edit, not invalid; with `blankPending` it is remembered too, so a re-render
+       * cannot quietly refill the box from the draft and let Save through with the old value.
+       */
+      function readNumber(input, min, message, blankPending) {
         const raw = input.value.trim();
         const n = Number(raw);
         const bad = !!(input.validity && input.validity.badInput);
@@ -392,7 +401,9 @@
         const invalid = !ok && !(raw === "" && !bad);
         input.setAttribute("aria-invalid", invalid ? "true" : "false");
         // An invalid value is not in the draft; remember its text so a re-render shows it again, still flagged.
-        if (invalid) invalidText.set(input.dataset.focus, bad ? input.value : raw); else invalidText.delete(input.dataset.focus);
+        if (invalid) invalidText.set(input.dataset.focus, bad ? input.value : raw);
+        else if (raw === "" && blankPending) invalidText.set(input.dataset.focus, "");
+        else invalidText.delete(input.dataset.focus);
         if (invalid) setStatus(message, "err");
         return ok ? n : undefined;
       }
@@ -412,7 +423,8 @@
           for (const [key, text] of invalidText) {
             const box = document.querySelector(`[data-focus="${CSS.escape(key)}"]`);
             // A box that is gone or disabled (its device unassigned) cannot be fixed, so it must not block Save.
-            if (box && !box.disabled) { box.value = text; box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
+            // A remembered blank is shown blank, unflagged until Save (which flags blank override boxes).
+            if (box && !box.disabled) { box.value = text; if (text !== "") box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
           }
         } finally {
           if (focused) {
@@ -549,7 +561,7 @@
         const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": `${label} (${row})`, "data-focus": key(part),
           oninput: (ev) => {
             // Mid-edit blanks keep the previous value; anything else invalid is flagged until fixed.
-            const n = readNumber(ev.target, 0, `${label} (${row}) must be a whole number, 0 or more.`);
+            const n = readNumber(ev.target, 0, `${label} (${row}) must be a whole number, 0 or more.`, true);
             if (n !== undefined) { ref.page = n; markDirty(); }
           } });
         return el("div", { class: "ds-row" },
@@ -600,10 +612,12 @@
         }
         pendingSaveId = id;
         pendingSave = JSON.stringify(draft.scopes);
+        saveTimedOut = false;
         setStatus("Saving…", ""); // the draft stays dirty until the plugin confirms
         clearSaveTimeout();
         saveTimer = setTimeout(() => {
           if (pendingSaveId !== id) return; // the reply, should it still come, is accepted all the same
+          saveTimedOut = true;
           setStatus("No reply from the plugin — is it running? Try Save again.", "err");
         }, 5000);
       });
@@ -613,11 +627,12 @@
         invalidText.clear();
         const active = document.activeElement;
         if (active && $("setup").contains(active)) active.blur(); // text being typed is discarded too, not carried across the re-render
-        if (pendingSaveId !== null) {
+        if (pendingSaveId !== null && !saveTimedOut) {
           // The save already went out and cannot be taken back; its confirmation is adopted as is.
           pendingSave = null;
           setStatus("Saving… (the save already sent cannot be discarded)", "");
         } else {
+          pendingSave = null; // a timed-out save, should it still be confirmed, is adopted as is too
           setStatus("", "");
         }
         renderSetup();

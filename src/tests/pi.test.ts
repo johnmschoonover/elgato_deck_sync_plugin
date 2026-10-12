@@ -498,6 +498,48 @@ describe("setup: scopes, roles, overrides", () => {
     expect(status()).toBe("Saved settings had problems; invalid scopes were ignored:\n• Scope 'bad' ignored: x");
   });
 
+  test("R11-F10 a blank override page box stays blank across a device push and still blocks Save", () => {
+    const ws = loadedPanel();
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Child page (override 1 of scope-1)"), "4");
+    setInput(byLabel("Child page (override 1 of scope-1)"), "");
+    ws.fromPlugin({ event: "devices", devices: [DEVICES[0], { ...DEVICES[1], isConnected: true }] }); // re-renders
+    expect(byLabel<HTMLInputElement>("Child page (override 1 of scope-1)").value).toBe("");
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first: Child page (override 1 of scope-1).");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+    setInput(byLabel("Child page (override 1 of scope-1)"), "3");
+    $("save").click();
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(1);
+  });
+
+  test("R11-F11 after a disconnect, edits keep the disconnect message and Add scope is disabled with Save", () => {
+    const ws = loadedPanel();
+    ws.close();
+    expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");
+    select(byLabel("Role of Deck C1 (disconnected)"), "parent");
+    expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");
+    expect($<HTMLButtonElement>("save").disabled).toBe(true);
+    expect($<HTMLButtonElement>("addScope").disabled).toBe(true);
+  });
+
+  test("R11-F12 once the Save watchdog has fired, Discard and later edits no longer report a save in progress", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Lost");
+    $("save").click();
+    jest.advanceTimersByTime(5000);
+    expect(status()).toBe("No reply from the plugin — is it running? Try Save again.");
+    $("discard").click();
+    expect(status()).toBe("");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1");
+    setInput(byLabel("Name of scope-1"), "Again");
+    expect(status()).toBe("Unsaved changes.");
+    jest.advanceTimersByTime(60_000);
+    expect(status()).toBe("Unsaved changes.");
+    ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [], id: lastSaveId(ws) }); // the lost reply arrives after all: still the confirmation of that save
+    expect(status()).toBe("Saved; you have further unsaved changes.");
+  });
+
   test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
     // Saved: P parent with an override. Swapping roles makes that override stale (hidden, dropped on Save).
     const saved = { version: 2, scopes: [{ ...SAVED.scopes[0], mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 1 }, b: { deviceId: "C1", page: 2 } }] } }] };

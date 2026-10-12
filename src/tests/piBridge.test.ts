@@ -9,6 +9,7 @@ const mockState = {
   ],
   getFails: false,
   setFails: false,
+  piActionId: "a1",
 };
 
 jest.mock("@elgato/streamdeck", () => ({
@@ -23,7 +24,7 @@ jest.mock("@elgato/streamdeck", () => ({
       setGlobalSettings: jest.fn(async (s: unknown) => { if (mockState.setFails) throw new Error("disk full"); mockState.stored = s; }),
     },
     ui: {
-      get action() { return (mockState as unknown as { piClosed?: boolean }).piClosed ? undefined : {}; },
+      get action() { return (mockState as unknown as { piClosed?: boolean }).piClosed ? undefined : { id: mockState.piActionId }; },
       onSendToPlugin: (l: (ev: unknown) => Promise<void>) => { mockState.listeners.sendToPlugin = l; },
       sendToPropertyInspector: jest.fn(async (p: unknown) => {
         if ((mockState as unknown as { failSend?: boolean }).failSend) throw new Error("no property inspector");
@@ -38,7 +39,7 @@ import { GLOBAL_SETTINGS_VERSION, createDefaultGlobalSettings } from "../setting
 
 const log = { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 const onSettingsSaved = jest.fn();
-const message = (payload: unknown) => mockState.listeners.sendToPlugin!({ payload });
+const message = (payload: unknown, from = "a1") => mockState.listeners.sendToPlugin!({ payload, action: { id: from } });
 
 const validSettings = {
   version: GLOBAL_SETTINGS_VERSION,
@@ -229,5 +230,19 @@ describe("R9-F7/R9-F8 after a save", () => {
     handle({ version: 2, scopes: [] });
     expect(engine.onSettingsChanged).toHaveBeenCalledTimes(1);
     expect(log.debug).toHaveBeenCalledWith(expect.stringContaining("already applied"));
+  });
+});
+
+describe("reply routing (R11-F9)", () => {
+  beforeEach(() => { mockState.sent = []; mockState.piActionId = "a1"; log.debug.mockClear(); });
+  test("a request from a panel that is no longer the open one is answered to the open panel, and said so at debug", async () => {
+    registerPropertyInspectorBridge({ log, onSettingsSaved });
+    mockState.piActionId = "a2";
+    await message({ event: "getDevices" }, "a1");
+    expect(mockState.sent).toHaveLength(1);
+    expect(log.debug).toHaveBeenCalledWith("PI: 'getDevices' came from action a1; the reply goes to the panel now open (action a2)");
+    log.debug.mockClear();
+    await message({ event: "getDevices" }, "a2");
+    expect(log.debug).not.toHaveBeenCalledWith(expect.stringMatching(/^PI: 'getDevices' came from/));
   });
 });

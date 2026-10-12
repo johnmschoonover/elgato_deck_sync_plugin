@@ -42,7 +42,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 │   ├── log.ts                               # logger contract
 │   ├── actions/page-anchor.ts               # the Page Anchor action (SDK event → engine input)
 │   ├── ids.ts                               # plugin/action UUIDs, checked against the manifest by a test
-│   └── tests/                               # Jest: settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log, purity
+│   └── tests/                               # Jest: settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), PI protocol contract, anchor adapter, profiles, assets, log, purity
 └── com.johnmschoonover.decksync.sdPlugin/   # the plugin package
     ├── manifest.json
     ├── imgs/                                # placeholder icons (final art: Epic E4)
@@ -86,7 +86,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **No on-disk profile editing.** Communicate only via the official WebSocket API.
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
 - **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (a type-only import such as `JsonObject` in `settings.ts`, from `@elgato/utils`, pinned as a devDependency, is erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) — never to classify an appear or to trip the conflicting-anchor breaker (its run is counted structurally).
-- **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket (the coverage figure jest reports covers `src/` only, not this script). Add a case there for every behaviour change. Saves carry an `id` the plugin echoes, so the panel never takes a stale or load reply for a confirmation.
+- **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket (the coverage figure jest reports covers `src/` only, not this script). Add a case there for every behaviour change. Saves carry an `id` the plugin echoes, so the panel never takes a stale or load reply for a confirmation. A renamed protocol event or field touches `piProtocol.ts`, `anchor.html` and `piBridge.ts` together — `src/tests/piContract.test.ts` pins the three to each other.
 - **Logs** land in the `logs/` folder inside the installed `.sdPlugin` folder — the repo's `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored) when linked; line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.
 

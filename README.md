@@ -74,6 +74,8 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
      manifest profile name such as `profiles/original`.
    - *Pages*: how many top-level pages that profile has (default 5).
    - Under the scope, add **overrides** (parent page ↔ child page) where the decks don't line up.
+   - A device's *Profile* and *Pages* follow it when it is moved to another scope, or unassigned
+     and assigned again, within the open panel; its overrides belong to the scope it left.
    - **Add scope** creates an empty scope to assign devices to; choosing *Parent* for a device
      demotes the scope's previous parent to a child; moving the last member out removes the
      scope, and empty scopes are dropped on Save. Each scope box has a **Remove scope** button
@@ -103,7 +105,7 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    | Fix the highlighted fields first: <field>. / Pages must be … / … must be a whole number … | a page count or override page is blank or not a whole number; the scope box holding the field is opened and the field focused |
    | Page index must be a whole number, 0 or more. The page index was not saved; Enabled was. | the marker's page index is invalid |
    | Saved settings had problems; invalid scopes were ignored: … | an earlier save held scopes the plugin dropped: fix and Save |
-   | Disconnected from Stream Deck — close and reopen this panel. | the app restarted under the panel |
+   | Disconnected from Stream Deck — close and reopen this panel. | the socket to the app closed (it restarted, or the panel is stale): Save and Add scope are disabled, edits keep this message, and a Save or marker edit attempted meanwhile shows it too |
    | No Stream Deck devices known yet. (table) | the app has announced no device; scopes from the saved configuration are still listed |
    | Assign at least a parent and one child to this scope. (scope box) | the scope has no overrides section until it has both |
    | n override(s) no longer involve the parent and will be dropped on Save (Discard changes restores them). | a role change orphaned overrides |
@@ -126,23 +128,23 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change that took its origin's standing away: its device or the target left the scope, or it is no longer the parent), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later landing on this device had passed it by: the app coalesced it, or it repeated a page), `left=true` (the device had left this page before the switch showed) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
-| `ANCHOR updated dev=P action=… page=2→3 enabled=true (no sync)` — or `… (consumed seq=n) (no sync)`, or `page=2→none (page index cleared; …)` | a visible anchor's settings were edited; the engine now knows the device is on that page (and takes a pending switch to that index as landed), or no longer knows its page |
+| `ANCHOR updated dev=P action=… page=2→3 enabled=true (no sync)` — or `… (consumed seq=n) (no sync)`, or `page=2→none (page index cleared; …)` | a visible anchor's settings were edited; the engine now knows the device is on that page (and takes a pending switch to that index as landed when it is the oldest switch still outstanding for the device), or no longer knows its page |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
 | `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
 | `IGNORED … reason=no-scope` (warn once per device per saved configuration, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
 | `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped (a run of 13 conflicts: pages reporting two page indices): a page on that device carries a copied anchor with the wrong page index; its sends resume after a page with a single anchor |
-| `IGNORED … reason=overturned-switches` (warn) | the other breaker tripped (13 sends in a row while a switch from another deck to this device never showed): a page on that device reports the wrong page index or has no Page Anchor; its sends resume once a switch lands there, or after a flip made with nothing outstanding |
+| `IGNORED … reason=overturned-switches` (warn, children only) | the other breaker tripped (13 sends in a row while a switch from another deck to this child never showed): pages on the two decks label each other wrongly, or a page has no Page Anchor; its sends resume once a switch lands there, or after a flip made with nothing outstanding |
 | `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `SEND dev=P page=6 scope=desk reason=beyond-page-count pageCount=5 — …` (warn, once per device and page) | the device flipped to a page its *Pages* setting says it does not have; nobody can follow until *Pages* is raised |
 | `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 switches to one device still awaiting a landing; the oldest are kept as echo tags only |
 | `QUEUED … reason=not-started` (or `… (replaces the disabled anchor's appear queued for this page)`), `CONFLICT …`, `OVERTURN …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed in order once they have; a page's enabled anchor reported after its disabled one is the flip replayed), a page reporting two page indices, a send while another deck's switch to the device has not shown, a reload that changed nothing |
-| `IGNORED … reason=duplicate` (with `(consumed seq=n)` or `(a switch to this page waits behind an older one; kept)`) / `multi-action` *(debug)* | second anchor on the page or a re-emit (it stands for a switch to that page only when that switch is the oldest outstanding) / not a page marker |
+| `IGNORED … reason=duplicate` (with `(consumed seq=n)`, `(a switch to this page waits behind an older one; kept)` or, before start, `(already queued)`) / `multi-action` *(debug)* | second anchor on the page, or a re-emit — the page just left reported again with nothing between (it stands for a switch to that page only when that switch is the oldest outstanding) / not a page marker |
 | `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` / `queued-later` *(debug)* | member skipped, with the fix (`queued-later`: its own flip made before the settings loaded is replayed next) |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
 | `DEVICE connected` (info for a device not yet armed: new, or after a disconnect; *debug* `(already armed; no change)` otherwise) / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
-| `LEAVE dev=P page=2`, `GC … reason=superseded` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch a later landing passed by (kept as a tag for 3 s) or one overtaken by the device leaving its page before it showed (kept for 30 s) / an old tag was dropped |
-| `UNEXPECTED handler=onAppear …` / `handler=onDisappear …` / `handler=onAnchorUpdated …` (error) | a bug: the handler threw (caught; a failed disappear or anchor edit changes nothing) — please report it |
+| `LEAVE dev=P page=2` (or `… (left before the settings loaded)`), `GC … reason=superseded` / `revived` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch a later landing passed by (kept as a tag for 3 s), one revived because a switch it had passed by showed after all, one overtaken by the device leaving its page before it showed (kept for 30 s) / an old tag was dropped |
+| `UNEXPECTED handler=onAppear …` / `handler=onDisappear …` / `handler=onAnchorUpdated …` (error) | a bug: the handler threw (caught: the appear is reported as `IGNORED … reason=error`, a failed disappear or anchor edit changes nothing) — please report it |
 | `Settings saved: n scope(s).` (info); `Settings: …` (warn: a scope rejected and why, `rejected a save … with n problem(s)`, `rejected a save … that carried no usable settings`, `Could not save settings (…)`, `could not read global settings (…); using defaults`, `ignoring an unusable global-settings payload`, `no reply from Stream Deck within 15000ms`; *debug*: an event before start, an event or `the late reply` ignored because the panel's save is already applied); `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message, or a request from a panel that is no longer the open one — the reply goes to the open panel); `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
 
 ## Troubleshooting
@@ -179,6 +181,8 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   default profile name (set *Profile* manually).
 - Button state is not synced, only the page.
 - Page Anchors inside Multi Actions are ignored (the action is not offered there).
+- The Page Anchor is a key action (`Controllers: ["Keypad"]`): it cannot sit on a Stream Deck +
+  dial or touch strip.
 - Copied anchors whose page index was not updated make a page report two indices; a
   conflicting-anchor breaker stops the resulting ping-pong, but the fix is the anchor's index.
 
@@ -188,7 +192,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 npm run typecheck   # tsc --noEmit (plugin, Node-only) && tsc -p tsconfig.test.json (tests, jsdom)
 npm run watch       # rebuild and restart the plugin on change (needs the Stream Deck app and developer mode: `npx streamdeck dev` once)
 npm run build       # rollup (fails on any warning)
-npm test            # jest — settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log, engine purity (coverage thresholds enforced)
+npm test            # jest — settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), PI protocol contract, anchor adapter, profiles, assets, log, engine purity (coverage thresholds enforced)
 npm run validate    # streamdeck validate
 npm run icons       # regenerate placeholder icons
 ```

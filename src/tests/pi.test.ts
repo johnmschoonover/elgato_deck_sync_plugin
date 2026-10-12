@@ -43,6 +43,8 @@ const setInput = (el: HTMLInputElement, value: string) => { el.value = value; el
 const select = (el: HTMLSelectElement, value: string) => { el.value = value; el.dispatchEvent(new Event("change")); };
 const byLabel = <T extends HTMLElement>(label: string) => document.querySelector(`[aria-label="${label}"]`) as T;
 const byFocus = <T extends HTMLElement>(key: string) => document.querySelector(`[data-focus="${key}"]`) as T;
+/** The id the panel attached to its most recent Save (the plugin echoes it in the reply). */
+const lastSaveId = (ws: FakeSocket) => ws.toPlugin("setGlobalSettings").at(-1)!.id as number;
 
 const DEVICES = [
   { id: "P", name: "Deck P", type: 0, isConnected: true, defaultProfile: "profiles/original" },
@@ -210,7 +212,7 @@ describe("setup: scopes, roles, overrides", () => {
     const sent = ws.toPlugin("setGlobalSettings");
     expect(sent).toHaveLength(1);
     expect(sent[0].settings).toEqual({ version: 2, scopes: [{ id: "scope-1", name: "Scope 1", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", profile: "profiles/plus", pageCount: 8 }], mapping: { mode: "positional", overrides: [] } }] });
-    ws.fromPlugin({ event: "globalSettings", settings: sent[0].settings as Msg, issues: [] });
+    ws.fromPlugin({ event: "globalSettings", settings: sent[0].settings as Msg, issues: [], id: lastSaveId(ws) });
     expect(status()).toBe("Saved.");
     expect($("status").className).toContain("ok");
   });
@@ -229,7 +231,7 @@ describe("setup: scopes, roles, overrides", () => {
     const ws = loadedPanel();
     setInput(byLabel("Name of scope-1"), "Desk");
     $("save").click();
-    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "Scope 'scope-1' ignored: a scope needs exactly one parent; found 0." }] });
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "Scope 'scope-1' ignored: a scope needs exactly one parent; found 0." }], id: lastSaveId(ws) });
     expect(status()).toBe("Not saved — fix these and try again:\n• Scope 'scope-1' ignored: a scope needs exactly one parent; found 0.");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk");
   });
@@ -248,7 +250,7 @@ describe("setup: scopes, roles, overrides", () => {
     $("save").click();
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as Msg;
     setInput(byLabel("Name of scope-1"), "Desk 2"); // typed while the plugin was saving
-    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
+    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [], id: lastSaveId(ws) });
     expect(status()).toBe("Saved; you have further unsaved changes.");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk 2");
     $("save").click();
@@ -263,7 +265,7 @@ describe("setup: scopes, roles, overrides", () => {
     $("discard").click();
     expect(status()).toBe("Saving… (the save already sent cannot be discarded)");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1"); // until the plugin answers
-    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
+    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [], id: lastSaveId(ws) });
     expect(status()).toBe("Saved.");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk"); // what the plugin holds
     $("save").click();
@@ -305,16 +307,65 @@ describe("setup: scopes, roles, overrides", () => {
     $("save").click();
     setInput(byLabel("Name of scope-1"), "Second");
     $("save").click();
-    const [s1, s2] = ws.toPlugin("setGlobalSettings").map((p) => p.settings as Msg);
-    ws.fromPlugin({ event: "globalSettings", settings: s1, issues: [] });
+    const [p1, p2] = ws.toPlugin("setGlobalSettings");
+    ws.fromPlugin({ event: "globalSettings", settings: p1.settings as Msg, issues: [], id: p1.id as number });
     expect(status()).toBe("Saving…"); // reply #1 is not the confirmation
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
-    ws.fromPlugin({ event: "globalSettings", settings: s2, issues: [] });
+    ws.fromPlugin({ event: "globalSettings", settings: p2.settings as Msg, issues: [], id: p2.id as number });
     expect(status()).toBe("Saved.");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
     setInput(byLabel("Profile for Deck P"), "profiles/x");
     $("save").click();
     expect((ws.toPlugin("setGlobalSettings")[2].settings as { scopes: Array<{ name: string }> }).scopes[0].name).toBe("Second"); // nothing reverted to First
+  });
+
+  test("R8-F6 a lost reply does not poison later saves, and a late load reply is never taken for a confirmation", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Lost");
+    $("save").click(); // its reply never comes
+    jest.advanceTimersByTime(5000);
+    expect(status()).toBe("No reply from the plugin — is it running? Try Save again.");
+    setInput(byLabel("Name of scope-1"), "Second");
+    $("save").click();
+    const [lost, second] = ws.toPlugin("setGlobalSettings");
+    ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [] }); // a slow reply to the initial load (no id)
+    expect(status()).toBe("Saving…"); // not mistaken for the confirmation; the draft is kept
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
+    ws.fromPlugin({ event: "globalSettings", settings: lost.settings as Msg, issues: [], id: lost.id as number }); // the lost reply turns up after all
+    expect(status()).toBe("Saving…");
+    ws.fromPlugin({ event: "globalSettings", settings: second.settings as Msg, issues: [], id: second.id as number });
+    expect(status()).toBe("Saved.");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Second");
+    setInput(byLabel("Name of scope-1"), "Third");
+    $("save").click();
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "nope" }], id: lastSaveId(ws) });
+    expect(status()).toBe("Not saved — fix these and try again:\n• nope"); // a rejection for the current save is honoured
+  });
+
+  test("R8-F9 renaming a scope refreshes the dropdown, the summary and the button names once the box is left", () => {
+    loadedPanel();
+    const name = byLabel<HTMLInputElement>("Name of scope-1");
+    setInput(name, "Desk");
+    expect(document.querySelector(".ds-scope summary")!.textContent).toBe("Scope 1: parent Deck P, 1 child"); // not yet
+    name.dispatchEvent(new Event("change"));
+    expect(document.querySelector(".ds-scope summary")!.textContent).toBe("Desk: parent Deck P, 1 child");
+    expect(byLabel("Remove scope Desk")).not.toBeNull();
+    expect([...byLabel<HTMLSelectElement>("Scope for Deck P").options].map((o) => o.textContent)).toContain("Desk");
+  });
+
+  test("R8-F13 odd inputs: a socket error, malformed JSON, a reply without settings, edits while disconnected, an unknown device", () => {
+    const ws = openPanel({}, "");
+    expect($("thisDevice").textContent).toBe("(unknown)");
+    ws.receive({ event: "sendToPropertyInspector", payload: { event: "globalSettings", issues: [] } } as Msg); // no settings: defaults
+    expect($("setup").textContent).toContain("No Stream Deck devices known yet.");
+    (ws as unknown as { emitRaw: (d: string) => void }).emitRaw?.("not json");
+    ws.receive({ event: "nonsense" });
+    ws.close();
+    setInput($("pageIndex"), "2");
+    expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");
+    $("save").click();
+    expect(status()).toBe("Disconnected from Stream Deck — close and reopen this panel.");
+    expect(ws.events("setSettings")).toHaveLength(0);
   });
 
   test("R7-F11 a save confirmed after the watchdog gave up still clears the error and the dirty state", () => {
@@ -324,7 +375,7 @@ describe("setup: scopes, roles, overrides", () => {
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as Msg;
     jest.advanceTimersByTime(5000);
     expect(status()).toBe("No reply from the plugin — is it running? Try Save again.");
-    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [] });
+    ws.fromPlugin({ event: "globalSettings", settings: sent, issues: [], id: lastSaveId(ws) });
     expect(status()).toBe("Saved.");
     $("discard").click();
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Desk"); // it was saved, so there is nothing to discard
@@ -335,7 +386,7 @@ describe("setup: scopes, roles, overrides", () => {
     setInput(byLabel("Name of scope-1"), "Desk");
     $("save").click();
     $("discard").click();
-    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }] });
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }], id: lastSaveId(ws) });
     expect(status()).toBe("The save sent earlier was rejected; the panel shows the last saved configuration:\n• page 9 is beyond the page count");
     expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Scope 1");
   });
@@ -370,7 +421,7 @@ describe("setup: scopes, roles, overrides", () => {
     const sent = ws.toPlugin("setGlobalSettings")[0].settings as { scopes: Array<{ parentDeviceId: string; mapping: { overrides: unknown[] } }> };
     expect(sent.scopes[0].parentDeviceId).toBe("C1");
     expect(sent.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "C1", page: 9 }, b: { deviceId: "P", page: 0 } }, { a: { deviceId: "C1", page: 0 }, b: { deviceId: "P", page: 3 } }]);
-    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }] });
+    ws.fromPlugin({ event: "globalSettingsRejected", issues: [{ message: "page 9 is beyond the page count" }], id: lastSaveId(ws) });
     expect(status()).toContain("Not saved");
     byLabel<HTMLButtonElement>("Remove override 2 of scope-1").click(); // the page-9 row
     expect(byLabel<HTMLInputElement>("Child page (override 3 of scope-1)")).toBeNull();

@@ -34,6 +34,10 @@ describe("bundled profiles", () => {
   test("default names follow the docs/PROFILES.md convention", () => {
     for (const name of Object.values(DEFAULT_PROFILE_BY_DEVICE_TYPE)) expect(name).toMatch(/^profiles\/[a-z]+$/);
   });
+
+  test("PRD §7.4: defaults exist for exactly the Original/MK.2, Mini, XL and Neo device types", () => {
+    expect(Object.keys(DEFAULT_PROFILE_BY_DEVICE_TYPE).map(Number).sort((a, b) => a - b)).toEqual([0, 1, 2, 9]);
+  });
 });
 
 describe("resolveProfile", () => {

@@ -17,6 +17,7 @@ const mock = {
   switchCalls: [] as unknown[][],
   connect: null as null | (() => Promise<void>),
   load: null as null | (() => Promise<unknown>),
+  switchImpl: null as null | (() => Promise<void>),
 };
 
 jest.mock("@elgato/streamdeck", () => {
@@ -28,7 +29,7 @@ jest.mock("@elgato/streamdeck", () => {
     SingletonAction: class {},
     default: {
       logger: { createScope: scopeLog },
-      profiles: { switchToProfile: async (...args: unknown[]) => { mock.switchCalls.push(args); } },
+      profiles: { switchToProfile: (...args: unknown[]) => { mock.switchCalls.push(args); return mock.switchImpl ? mock.switchImpl() : Promise.resolve(); } },
       devices: Object.assign(mock.devices, {
         getDeviceById: (id: string) => mock.devices.find((d) => d.id === id),
         onDeviceDidConnect: (l: Listener) => { (mock.listeners.connect ??= []).push(l); },
@@ -76,6 +77,7 @@ beforeEach(() => {
   mock.stored = {};
   mock.listeners = {};
   mock.load = null;
+  mock.switchImpl = null;
   for (const d of mock.devices) d.isConnected = false;
 });
 afterEach(() => jest.useRealTimers());
@@ -178,17 +180,36 @@ test("a lost global-settings reply does not stall start-up: after 15 s the engin
   expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
 });
 
-test("a reply that lands while start() is still replaying is applied once start has finished (R7-F7)", async () => {
+test("a reply that lands while start() is still replaying is applied once start has finished (R7-F7/R8-F12)", async () => {
   jest.useFakeTimers();
   let release: (s: unknown) => void = () => {};
   mock.load = () => new Promise((resolve) => { release = resolve; });
+  let ack: () => void = () => {};
+  mock.switchImpl = () => new Promise<void>((resolve) => { ack = resolve; }); // the app is slow to acknowledge switches
   mock.connect = () => Promise.resolve();
+  mock.devices.forEach((d) => { d.isConnected = true; });
   jest.isolateModules(() => { require("../plugin"); });
+  // A save from the panel before the settings load is held for start(), and P is armed and flipped: the flip is queued.
+  await fire("sendToPlugin", { payload: { event: "setGlobalSettings", settings: scopeSettings("Saved early") } });
+  await appear("P", 0);
+  await appear("C1", 0);
+  (mock.registered[0] as PageAnchorAction).onWillDisappear({ action: { id: "P-p0", device: { id: "P" } }, payload: { settings: { pageIndex: 0 }, isInMultiAction: false } } as never);
+  await appear("P", 1);
+  expect(lines("sync", /^QUEUED dev=P page=1/)).toHaveLength(1);
+  // The read times out; start() uses the held save, replays the flip and waits for the app to acknowledge C1's switch.
   await jest.advanceTimersByTimeAsync(15_000);
-  expect(lines("sync", /^START .*scopes=0 /)).toHaveLength(1);
-  release(scopeSettings("Late")); // the read resolves after all (its event, had it come during start(), was ignored)
+  expect(lines("sync", /^START .*scopes=1 .*queued=1$/)).toHaveLength(1);
+  expect(mock.switchCalls).toEqual([["C1", "profiles/mini", 1]]);
+  // While start() is still busy the event and the read both arrive: the event is ignored, the read is applied afterwards.
+  await fire("globalSettings", { settings: scopeSettings("Late") });
+  expect(lines("DeckSync", /global-settings event before start/)).toHaveLength(1);
+  release(scopeSettings("Late"));
   await jest.advanceTimersByTimeAsync(0);
-  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1);
+  expect(lines("sync", /^SETTINGS applied \(update\)/)).toHaveLength(0); // not before start() has finished
+  ack();
+  await jest.advanceTimersByTimeAsync(0);
+  expect(lines("sync", /^SETTINGS applied \(update\) scopes=\[desk/)).toHaveLength(1); // the late read, once
+  expect(lines("sync", /^SETTINGS unchanged \(update\)/)).toHaveLength(1); // the held save re-applied as a no-op
 });
 
 test("a failed connect is logged as a start-up failure, never thrown", async () => {

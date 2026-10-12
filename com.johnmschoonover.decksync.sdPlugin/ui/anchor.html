@@ -74,8 +74,9 @@
       let saved = { version: 2, scopes: [] }; // last settings confirmed by the plugin
       let draft = clone(saved);               // what the user is editing
       let dirty = false;                      // draft differs from saved
-      let statusWasSaving = false;            // a Save is awaiting the plugin's reply
-      let savesInFlight = 0;                  // replies carry no id: only the reply to the last Save sent confirms the draft
+      let statusWasSaving = false;            // "Saving…" is on screen
+      let saveSeq = 0;                        // ids for saves; the plugin echoes the id in its reply
+      let pendingSaveId = null;               // the Save whose reply confirms or rejects the draft (null: none)
       let actionUuid = null;                  // this action's UUID, from actionInfo
       let saveTimer = null;                   // "no reply" watchdog for Save
       let loaded = false;                     // the first globalSettings reply has arrived
@@ -83,7 +84,6 @@
       let loadAttempts = 0;                   // initial-load retries
       let loadTimer = null;                   // "no reply" watchdog for the initial load
       let pendingSave = null;                 // the scopes as sent by Save, to notice edits made meanwhile
-      let lateSave = false;                   // the Save watchdog gave up, but its reply may still come
       let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
       let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
@@ -111,6 +111,7 @@
           clearSaveTimeout();
           if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
           statusWasSaving = false;
+          pendingSaveId = null;
           $("save").disabled = true;
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
         };
@@ -181,12 +182,11 @@
             break;
           }
           case "globalSettings": {
+            // A reply to a Save carries its id; one for a Save that a later Save replaced (or whose
+            // watchdog-era twin arrives late) is ignored. A reply without an id is a plain load.
+            const confirmed = payload.id !== undefined;
+            if (confirmed && payload.id !== pendingSaveId) break;
             saved = payload.settings || { version: 2, scopes: [] };
-            if (savesInFlight > 0) savesInFlight--;
-            if (savesInFlight > 0) break; // an earlier Save's reply; the last one sent is what the draft must be compared with
-            clearSaveTimeout();
-            const confirmed = statusWasSaving || lateSave;
-            lateSave = false;
             let editedMeanwhile = false;
             if (!loaded) {
               // The first load is authoritative: nothing edited before it can be trusted.
@@ -199,6 +199,8 @@
               renderSetup();
               setStatus("", "");
             } else if (confirmed) {
+              clearSaveTimeout();
+              pendingSaveId = null;
               // Edits made while the plugin was saving stay in the draft, still unsaved. A Discard
               // made meanwhile (dirty is false) adopts the confirmed configuration instead.
               editedMeanwhile = dirty && JSON.stringify(draft.scopes) !== pendingSave;
@@ -207,8 +209,8 @@
                 dirty = false;
                 renderSetup();
               }
-            } else if (!dirty) {
-              draft = clone(saved);
+            } else if (!dirty && pendingSaveId === null) {
+              draft = clone(saved); // a reload while nothing is being edited or saved
               renderSetup();
             }
             if (payload.issues && payload.issues.length) {
@@ -216,16 +218,18 @@
             } else if (confirmed) {
               setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
             }
-            statusWasSaving = false;
-            pendingSave = null;
+            if (confirmed) {
+              statusWasSaving = false;
+              pendingSave = null;
+            }
             break;
           }
           case "globalSettingsRejected":
-            if (savesInFlight > 0) savesInFlight--;
-            if (savesInFlight > 0) break;
+            if (payload.id !== pendingSaveId) break; // not the Save awaiting a verdict
             clearSaveTimeout();
+            pendingSaveId = null;
             statusWasSaving = false; // the draft stays dirty so the user can fix it
-            lateSave = false;
+            pendingSave = null;
             setStatus((dirty
               ? "Not saved — fix these and try again:\n"
               : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []), "err");
@@ -492,7 +496,7 @@
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
-          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
+          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); }, onchange: () => renderSetup() }),
           el("button", { class: "ds-fixed", "aria-label": `Remove scope ${scope.name || scope.id}`, "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
 
         if (parent && children.length) {
@@ -550,27 +554,26 @@
           syncParentId(s);
           return { ...s, mapping: { mode: "positional", overrides: validOverrides(s) } };
         });
-        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes } })) {
+        const id = ++saveSeq;
+        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes }, id })) {
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;
         }
+        pendingSaveId = id;
         pendingSave = JSON.stringify(draft.scopes);
-        savesInFlight++;
         statusWasSaving = true; // the draft stays dirty until the plugin confirms
-        lateSave = false;
         setStatus("Saving…", "");
         clearSaveTimeout();
         saveTimer = setTimeout(() => {
-          if (!statusWasSaving) return;
-          statusWasSaving = false;
-          lateSave = true; // a reply after all still confirms this draft
+          if (pendingSaveId !== id) return;
+          statusWasSaving = false; // the reply, should it still come, is accepted all the same
           setStatus("No reply from the plugin — is it running? Try Save again.", "err");
         }, 5000);
       });
       $("discard").addEventListener("click", () => {
         draft = clone(saved);
         dirty = false;
-        if (statusWasSaving) {
+        if (pendingSaveId !== null) {
           // The save already went out and cannot be taken back; its confirmation is adopted as is.
           pendingSave = null;
           setStatus("Saving… (the save already sent cannot be discarded)", "");

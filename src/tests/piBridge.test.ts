@@ -191,3 +191,18 @@ describe("R5-F19 the PI's own settings read", () => {
     expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("Scope 'bad' ignored"));
   });
 });
+
+describe("R8-F6 save ids", () => {
+  test("a save's id is echoed in its confirmation and in its rejection; a save without one gets none", async () => {
+    await message({ event: "setGlobalSettings", settings: validSettings, id: 7 });
+    expect(mockState.sent[0]).toEqual({ event: "globalSettings", settings: validSettings, issues: [], id: 7 });
+    await message({ event: "setGlobalSettings", settings: { version: 2, scopes: [{ id: "bad", members: [] }] }, id: 8 });
+    expect(mockState.sent[1]).toMatchObject({ event: "globalSettingsRejected", id: 8 });
+    mockState.setFails = true;
+    await message({ event: "setGlobalSettings", settings: validSettings, id: 9 });
+    expect(mockState.sent[2]).toMatchObject({ event: "globalSettingsRejected", issues: [{ message: expect.stringContaining("disk full") }], id: 9 });
+    mockState.setFails = false;
+    await message({ event: "setGlobalSettings", settings: validSettings });
+    expect(mockState.sent[3]).toEqual({ event: "globalSettings", settings: validSettings, issues: [] });
+  });
+});

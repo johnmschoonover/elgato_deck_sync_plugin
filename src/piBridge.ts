@@ -101,11 +101,12 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
         break;
       }
       case "setGlobalSettings": {
+        const tag = typeof p.id === "number" ? { id: p.id } : {}; // echoed so the PI matches the reply to its save
         const { settings, issues } = validateGlobalSettings(p.settings);
         if (issues.length) {
           log.warn(`Settings: rejected a save from the Property Inspector with ${issues.length} problem(s).`);
           logIssues(log, issues);
-          await send({ event: "globalSettingsRejected", issues });
+          await send({ event: "globalSettingsRejected", issues, ...tag });
           return;
         }
         try {
@@ -113,12 +114,12 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
         } catch (err) {
           const message = `Could not save settings (${describeError(err)}).`;
           log.warn(`Settings: ${message}`);
-          await send({ event: "globalSettingsRejected", issues: [{ message }] });
+          await send({ event: "globalSettingsRejected", issues: [{ message }], ...tag });
           return;
         }
         log.info(`Settings saved: ${settings.scopes.length} scope(s).`);
         onSettingsSaved(settings);
-        await send({ event: "globalSettings", settings, issues: [] });
+        await send({ event: "globalSettings", settings, issues: [], ...tag });
         break;
       }
       default:

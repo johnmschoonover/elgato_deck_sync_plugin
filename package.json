@@ -19,6 +19,7 @@
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",
     "@types/jest": "^30.0.0",
+    "@types/node": "^24.19.2",
     "jest": "^30.4.2",
     "jest-environment-jsdom": "^30.5.2",
     "rollup": "^4.0.0",

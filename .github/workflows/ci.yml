@@ -32,5 +32,8 @@ jobs:
     - name: Build
       run: npm run build
 
+    - name: Validate plugin package (manifest + assets)
+      run: npm run validate
+
     - name: Run tests
       run: npm test

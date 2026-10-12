@@ -8,9 +8,12 @@
     "build": "rollup -c",
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\"",
     "test": "jest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate": "streamdeck validate --no-update-check com.johnmschoonover.decksync.sdPlugin",
+    "icons": "node scripts/make-placeholder-icons.mjs"
   },
   "devDependencies": {
+    "@elgato/cli": "^1.10.2",
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",

@@ -49,8 +49,8 @@ npm run build        # → com.johnmschoonover.decksync.sdPlugin/bin/plugin.js
 npm run validate     # official manifest/asset validator
 ```
 
-Then either `npx streamdeck link com.johnmschoonover.decksync.sdPlugin` (developer mode)
-or copy the `.sdPlugin` folder into the Stream Deck plugins directory
+Then either enable developer mode once with `npx streamdeck dev` and run
+`npx streamdeck link com.johnmschoonover.decksync.sdPlugin`, or copy the `.sdPlugin` folder into the Stream Deck plugins directory
 (macOS `~/Library/Application Support/com.elgato.StreamDeck/Plugins/`,
 Windows `%APPDATA%\Elgato\StreamDeck\Plugins\`) and restart the app.
 A **Deck Sync** category with the **Page Anchor** action appears in the actions list.
@@ -115,9 +115,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | Line | Meaning |
 |---|---|
 | `START devices=[P,C1] scopes=1 ttlMs=3000 graceMs=30000 queued=0` | engine started after connect (`queued`: flips made before the settings loaded, replayed next) |
-| `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded |
+| `SETTINGS applied (start\|update) scopes=[…] detachedPending=0` | configuration (re)loaded (`detachedPending`: switches in flight whose origin lost its standing — its device or the target left the scope, or it is no longer the parent; a rename or mapping change detaches nothing) |
 | `SEND dev=P role=parent scope=desk page=2 canonical=2 seq=7 targets=[C1→profiles/mini#4] skipped=[C2:already-there]` | human navigation fanned out |
-| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later switch to the same page had already landed), `left=true` (the device had left this page before the switch showed) |
+| `RECEIVE dev=C1 page=4 seq=7 origin=P scope=desk (echo consumed; no rebroadcast)` | a switch the plugin issued landed; at most one flag: `late=true` (later than 3 s — a detached one shows this after 3 s too), `detached=true` (issued before a settings change), `capped=true` (one of more than 50 switches still awaiting a landing), `superseded=true` (a later landing on this device had passed it by: the app coalesced it, or it repeated a page), `left=true` (the device had left this page before the switch showed) |
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `ANCHOR updated dev=P action=… page=2→3 enabled=true (no sync)` — or `… (consumed seq=n) (no sync)`, or `page=2→none (page index cleared; …)` | a visible anchor's settings were edited; the engine now knows the device is on that page (and takes a pending switch to that index as landed), or no longer knows its page |
@@ -128,13 +128,13 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `QUEUE full dev=P page=3 reason=not-started — … dropped the oldest (dev=P page=1)` (warn) | more than 20 flips before the settings loaded; the newest are kept |
 | `SEND dev=P page=6 scope=desk reason=beyond-page-count pageCount=5 — …` (warn, once per device and page) | the device flipped to a page its *Pages* setting says it does not have; nobody can follow until *Pages* is raised |
 | `GC dev=C1 page=1 seq=1 reason=cap — …` (warn) | more than 50 switches to one device still awaiting a landing; the oldest are kept as echo tags only |
-| `QUEUED … reason=not-started`, `CONFLICT …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed in order once they have), a page reporting two page indices, a reload that changed nothing |
+| `QUEUED … reason=not-started` (or `… (replaces the disabled anchor's appear queued for this page)`), `CONFLICT …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed in order once they have; a page's enabled anchor reported after its disabled one is the flip replayed), a page reporting two page indices, a reload that changed nothing |
 | `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
 | `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` / `queued-later` *(debug)* | member skipped, with the fix (`queued-later`: its own flip made before the settings loaded is replayed next) |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
 | `DEVICE connected` (info for a device not yet armed: new, or after a disconnect; *debug* `(already armed; no change)` otherwise) / `DEVICE disconnected … droppedPending=n` (`droppedQueued=n` when pre-start flips were discarded) | device events |
-| `LEAVE dev=P page=2`, `GC … reason=superseded` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch overtaken by a later landing on its page (kept as a tag for 3 s) or by the device leaving its page before it showed (kept for 30 s) / an old tag was dropped |
+| `LEAVE dev=P page=2`, `GC … reason=superseded` / `left-page` / `grace-elapsed` / `duplicate-tag` *(debug)* | a page was left / a switch a later landing passed by (kept as a tag for 3 s) or one overtaken by the device leaving its page before it showed (kept for 30 s) / an old tag was dropped |
 | `UNEXPECTED handler=onAppear …` / `handler=onDisappear …` (error) | a bug: the handler threw (caught; a failed disappear changes nothing) — please report it |
 | `Settings saved: n scope(s).` (info); `Settings: …` (warn: a scope rejected and why, `rejected a save … with n problem(s)`, `rejected a save … that carried no usable settings`, `Could not save settings (…)`, `could not read global settings (…); using defaults`, `ignoring an unusable global-settings payload`, `no reply from Stream Deck within 15000ms`; *debug*: an event before start, an event or `the late reply` ignored because the panel's save is already applied); `PI: …` (warn: a reply could not be sent; *debug*: no panel open, unknown message); `Startup failed: …` (error) — `DeckSync` scope | configuration and Property Inspector traffic; the plugin could not start |
 
@@ -153,8 +153,8 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 - **A page flip did nothing once right after a switch** — expected only when the page you
   flipped to is one the plugin had just tried to switch that device to: the flip is logged as
   a `RECEIVE` (plain within 3 s, `late=true` after a `SWITCH unconfirmed` warning,
-  `superseded=true` when a later switch to that page had landed first, or `left=true` when
-  the device had left the page before the switch showed) instead of a `SEND`, and within the
+  `superseded=true` when a later landing had passed the switch by, or `left=true` when the
+  device had left the page before the switch showed) instead of a `SEND`, and within the
   first 3 s the deck can once jump back to its previous page. The switch never showed because
   the device was already there, the page has no Page Anchor, or the profile is not bundled;
   see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
@@ -179,7 +179,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 
 ```bash
 npm run typecheck   # tsc --noEmit (plugin, Node-only) && tsc -p tsconfig.test.json (tests, jsdom)
-npm run watch       # rebuild and restart the plugin on change (needs the Stream Deck app and developer mode)
+npm run watch       # rebuild and restart the plugin on change (needs the Stream Deck app and developer mode: `npx streamdeck dev` once)
 npm run build       # rollup (fails on any warning)
 npm test            # jest — settings, mapping, engine, plugin wiring, PI bridge, PI page (jsdom), anchor adapter, profiles, assets, log, engine purity (coverage thresholds enforced)
 npm run validate    # streamdeck validate

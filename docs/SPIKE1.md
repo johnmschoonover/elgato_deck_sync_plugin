@@ -27,7 +27,9 @@ visible (`com.johnmschoonover.decksync.sdPlugin/logs/`).
 
 **Part A — detection.**
 1. On the child's bundled profile, page 0, create a folder and inside it place a Page
-   Anchor with *Page index* `9` and *Enabled* **off** (so it never SENDs).
+   Anchor with *Page index* `9` and *Enabled* **off** (so it never SENDs). Editing the anchor
+   while the folder is open logs `ANCHOR updated dev=<child> … page=…→9 enabled=false (no
+   sync)` and records the child as being on page 9 — so leave the folder before step 2.
 2. Enter the folder by pressing its key. Expect `IGNORED dev=<child> page=9 scope=… reason=disabled`
    (info) — the appear fired and was classified. Record whether it appeared at all.
 3. Leave the folder. Record whether the page-0 anchor's appear fires again: expect

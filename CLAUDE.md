@@ -36,7 +36,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 │   ├── settings.ts                          # global settings schema (PRD §6.5) + warn-not-throw validation, anchor settings
 │   ├── mapping.ts                           # parent-canonical page mapping (positional + overrides)
 │   ├── profiles.ts                          # device type → bundled profile name defaults
-│   ├── piBridge.ts / piProtocol.ts          # plugin side of the Property Inspector protocol
+│   ├── piBridge.ts / piProtocol.ts          # PI protocol (devices, settings load/save with validation, save ids) + the global-settings read and event handler
 │   ├── log.ts                               # logger contract
 │   ├── actions/page-anchor.ts               # the Page Anchor action (SDK event → engine input)
 │   ├── ids.ts                               # plugin/action UUIDs, checked against the manifest by a test
@@ -65,7 +65,7 @@ CI runs the same four commands on every push/PR to `main`. Run them all before p
 
 - **Node.js v24** is the runtime target (declared in the manifest); CI covers 22.x and 24.x.
 - TypeScript 5 strict, **native TC39 decorators**. Do **not** enable `experimentalDecorators`.
-- There is no headless Stream Deck runtime — behaviour on real devices is verified by John (see below). `npm run watch` only works on a machine with the Stream Deck app.
+- There is no headless Stream Deck runtime — behaviour on real devices is verified by John (see below). `npm run watch` only works on a machine with the Stream Deck app in developer mode (`npx streamdeck dev`, once).
 
 ## Known issues / current state (October 2026)
 
@@ -73,7 +73,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 
 1. **No bundled profiles (D1, [gate]).** There is no `profiles/` directory; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
-3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor breaker, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
+3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor breaker, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached, left-page — PRD §8.6 "never forgotten"), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
 4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).
 
 ## Conventions
@@ -83,7 +83,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **Profiles** must be bundled with the plugin and registered in `manifest.json` → `Profiles`; the SDK cannot switch to user-created profiles. Creating valid `.streamDeckProfile` bundles is a hardware task.
 - **No on-disk profile editing.** Communicate only via the official WebSocket API.
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
-- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (type-only imports such as `JsonObject` in `settings.ts` and `JsonValue` in `piBridge.ts`, from `@elgato/utils`, pinned as a devDependency, are erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) — never to classify an appear or to trip the conflicting-anchor breaker (its run is counted structurally).
+- **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (a type-only import such as `JsonObject` in `settings.ts`, from `@elgato/utils`, pinned as a devDependency, is erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) — never to classify an appear or to trip the conflicting-anchor breaker (its run is counted structurally).
 - **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket (the coverage figure jest reports covers `src/` only, not this script). Add a case there for every behaviour change. Saves carry an `id` the plugin echoes, so the panel never takes a stale or load reply for a confirmation.
 - **Logs** land in `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored); line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.

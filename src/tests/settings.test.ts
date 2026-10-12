@@ -31,10 +31,34 @@ const withScope = (patch: Record<string, unknown>) => ({
   scopes: [{ ...JSON.parse(JSON.stringify(desk)), ...patch }],
 });
 
+/** The reason each rejected row must be rejected for (not just "ignored"). */
+const REJECTION_REASONS: Record<string, RegExp> = {
+  "two parents": /exactly one parent; found 2/,
+  "no parent": /exactly one parent; found 0/,
+  "no child": /at least one child/,
+  "parentDeviceId is not the parent member": /'parentDeviceId' \(C1\) is not the parent member \(P\)/,
+  "unknown role": /member P has role "boss"/,
+  "device listed twice": /device P is listed twice/,
+  "members not an array": /'members' must be an array/,
+  "unknown mapping mode": /unknown mapping mode "fancy"/,
+  "override endpoint not a member": /refers to X, which is not a member/,
+  "override negative page": /non-negative integer 'page'/,
+  "override fractional page": /non-negative integer 'page'/,
+  "override pairs a device with itself": /pairs device P with itself/,
+  "override between two children": /must pair a page of the parent \(P\)/,
+  "same parent page pinned twice for one child": /parent page 0 is already pinned for child C1/,
+  "same child page pinned twice": /child page 1 is already pinned for child C1/,
+  "override page beyond the member's page count": /page 3 of C1 is beyond its 3 pages/,
+  "override page beyond the default page count": /page 5 of P is beyond its 5 pages/,
+  "pageCount zero": /invalid 'pageCount' \(0\)/,
+  "pageCount fractional": /invalid 'pageCount' \(2\.5\)/,
+  "pageCount as a string": /invalid 'pageCount' \("5"\)/,
+};
+
 describe("validateGlobalSettings", () => {
   test("fresh install (undefined / {}) yields defaults without issues", () => {
     for (const input of [undefined, null, {}]) {
-      expect(validateGlobalSettings(input)).toEqual({ settings: createDefaultGlobalSettings(), issues: [] });
+      expect(validateGlobalSettings(input)).toEqual({ settings: createDefaultGlobalSettings(), issues: [], fatal: false });
     }
   });
 
@@ -103,10 +127,11 @@ describe("validateGlobalSettings", () => {
     ["wrong version", { version: 1, scopes: [] }],
     ["legacy v1 shape", { version: "1.0.0", scopes: [{ id: "all", name: "All", deviceIds: [] }], roles: [], mappings: [] }],
     ["scopes not an array", { version: 2, scopes: {} }],
-  ])("%s → defaults plus an issue, never a throw", (_, input) => {
+  ])("%s → defaults plus a fatal issue, never a throw", (_, input) => {
     const result = validateGlobalSettings(input);
     expect(result.settings).toEqual(createDefaultGlobalSettings());
     expect(result.issues).toHaveLength(1);
+    expect(result.fatal).toBe(true);
   });
 
   test.each([
@@ -142,12 +167,14 @@ describe("validateGlobalSettings", () => {
     ["pageCount zero", withScope({ members: [{ deviceId: "P", role: "parent", pageCount: 0 }, { deviceId: "C1", role: "child" }] })],
     ["pageCount fractional", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 2.5 }] })],
     ["pageCount as a string", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: "5" }] })],
-  ])("drops a scope with %s and reports it", (_, input) => {
+  ])("drops a scope with %s and reports it", (name, input) => {
     const result = validateGlobalSettings(input);
     expect(result.settings.scopes).toEqual([]);
     expect(result.issues).toHaveLength(1);
     expect(result.issues[0].message).toMatch(/^Scope 'desk' ignored:/);
+    expect(result.issues[0].message).toMatch(REJECTION_REASONS[name]);
     expect(result.issues[0].scopeId).toBe("desk");
+    expect(result.fatal).toBe(false);
   });
 
   test("a scope without an id is reported by index", () => {

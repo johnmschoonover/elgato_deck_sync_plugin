@@ -4,6 +4,7 @@
  *
  * Pure TypeScript: the Stream Deck SDK reaches it only through the small
  * interfaces below, so every rule is unit-testable (src/tests/syncEngine.test.ts).
+ * Design notes: docs/SYNC_ENGINE.md.
  *
  * The model:
  *
@@ -17,13 +18,15 @@
  * - Devices start un-armed; the first appear after plugin start or device
  *   (re)connect arms the device and never syncs (PRD §4.4). No settle window.
  * - Parent precedence: a child's human navigation while a parent-issued
- *   switch to it is still pending is SUPPRESSED; a parent's never is. A switch
- *   that lands on a device after that device's own later SEND is stale: it is
- *   swallowed and the device restored to its human page, and a SEND from a
- *   device with switches still heading for it re-asserts its page, so the
- *   human's choice outlives anything in flight.
- * - Time is used only to garbage-collect pending entries that can never echo
- *   (the device was already on that page); it never classifies an appear.
+ *   switch to it is still expected is SUPPRESSED; a parent's never is. A
+ *   switch that lands on a device after that device's own later SEND is
+ *   stale: swallowed, and the device restored to its human page.
+ * - Time never classifies an appear. After `pendingTtlMs` an unconfirmed
+ *   entry is marked expired: it no longer suppresses a child or counts as
+ *   where the device will be, but it remains an echo tag, so a late landing
+ *   is still a RECEIVE. Expired entries are dropped after `pendingGraceMs`
+ *   (bounded memory), when a later switch to the device lands, or when the
+ *   device disconnects.
  */
 import { resolveTargets, toCanonical } from "./mapping";
 import type { Log } from "./log";
@@ -57,8 +60,12 @@ export interface DeviceDirectory {
 export type EngineDeps = { switcher: Switcher; clock: Clock; log: Log; devices: DeviceDirectory };
 
 export type EngineOptions = {
-  /** How long a pending switch may wait for its appear before it is garbage-collected. Default 3000. */
+  /** After this long without an appear a pending switch stops suppressing/predicting (default 3000 ms). */
   pendingTtlMs?: number;
+  /** An expired entry stays an echo tag this long after it was issued (default 30000 ms). */
+  pendingGraceMs?: number;
+  /** Hard cap on entries kept per device (default 50). */
+  maxPendingPerDevice?: number;
 };
 
 /* ---------------- events in, outcomes out ---------------- */
@@ -87,6 +94,8 @@ export type Outcome = {
   reason?: IgnoreReason | "parent-in-flight";
   /** The SEND's sequence number, or the consumed entry's for RECEIVE*. */
   seq?: number;
+  /** True when a RECEIVE matched an entry that had already expired (a late echo). */
+  late?: boolean;
   issued: IssuedSwitch[];
   skipped: SkippedTarget[];
 };
@@ -102,12 +111,16 @@ type Pending = {
   originId: string;
   originRole: Origin;
   issuedAt: number;
+  /** Past the TTL (or detached by a settings change): an echo tag only. */
+  expired: boolean;
 };
 
 type DeviceState = {
   id: string;
   /** False until the first appear after start/connect; such an appear is STARTUP. */
   armed: boolean;
+  /** Set by a disconnect; the next connect then disarms the device. */
+  disconnected: boolean;
   /** The page the device is believed to show; null when unknown (left the page, reconnect). */
   lastKnownPage: number | null;
   /** Plugin-issued switches that have not landed, in issue order. */
@@ -125,6 +138,7 @@ export type EngineSnapshot = {
 };
 
 const ignored = (reason: IgnoreReason): Outcome => ({ classification: "IGNORED", reason, issued: [], skipped: [] });
+const fresh = (dev: DeviceState): Pending[] => dev.pending.filter((p) => !p.expired);
 
 export class SyncEngine {
   private settings: GlobalSettings = createDefaultGlobalSettings();
@@ -133,10 +147,14 @@ export class SyncEngine {
   private readonly warnedNoPage = new Set<string>();
   private readonly notedNoScope = new Set<string>();
   private readonly ttl: number;
+  private readonly grace: number;
+  private readonly cap: number;
   private readonly log: Log;
 
   constructor(private readonly deps: EngineDeps, options: EngineOptions = {}) {
     this.ttl = options.pendingTtlMs ?? 3000;
+    this.grace = Math.max(options.pendingGraceMs ?? 30000, this.ttl);
+    this.cap = options.maxPendingPerDevice ?? 50;
     this.log = deps.log;
   }
 
@@ -146,7 +164,7 @@ export class SyncEngine {
   start(settings: GlobalSettings): void {
     for (const d of this.deps.devices.list()) this.device(d.id);
     this.applySettings(settings, "start");
-    this.log.info(`START devices=[${[...this.devices.keys()].join(",")}] scopes=${this.settings.scopes.length} ttlMs=${this.ttl}`);
+    this.log.info(`START devices=[${[...this.devices.keys()].join(",")}] scopes=${this.settings.scopes.length} ttlMs=${this.ttl} graceMs=${this.grace}`);
   }
 
   /** Validated settings from the PI or the global-settings event. */
@@ -155,29 +173,41 @@ export class SyncEngine {
   }
 
   private applySettings(settings: GlobalSettings, why: "start" | "update"): void {
-    // The global-settings event also fires for plain reads (e.g. when the PI opens); a
-    // reload that changes nothing must not drop switches in flight.
-    if (why === "update" && JSON.stringify(settings) === JSON.stringify(this.settings)) {
-      this.log.debug("SETTINGS unchanged; keeping state");
+    // The global-settings event also fires for plain reads (e.g. when the PI opens).
+    if (JSON.stringify(settings) === JSON.stringify(this.settings)) {
+      this.log.debug(`SETTINGS unchanged (${why}); keeping state`);
       return;
     }
     this.settings = settings;
     this.notedNoScope.clear();
-    // Pending switches were issued under the old topology; their origins mean nothing now.
-    let dropped = 0;
+    // Switches in flight were issued under the old topology: their origins no longer mean
+    // anything (no suppression, no prediction), but they remain echo tags so their landings
+    // can never be mistaken for human navigation.
+    let detached = 0;
     for (const dev of this.devices.values()) {
-      dropped += dev.pending.length;
-      dev.pending = [];
+      for (const p of dev.pending) {
+        if (!p.expired) {
+          p.expired = true;
+          detached++;
+        }
+      }
     }
     const scopes = settings.scopes
       .map((s) => `${s.id}{parent=${s.parentDeviceId},children=${s.members.length - 1},overrides=${s.mapping.overrides.length}}`)
       .join(" ");
-    this.log.info(`SETTINGS applied (${why}) scopes=[${scopes}] droppedPending=${dropped}`);
+    this.log.info(`SETTINGS applied (${why}) scopes=[${scopes}] detachedPending=${detached}`);
   }
 
   onDeviceConnected(deviceId: string): void {
     const dev = this.device(deviceId);
-    dev.armed = false; // its (re)connect appears are STARTUP
+    // The app may announce devices it already showed us (e.g. at launch); only a device we
+    // saw disconnect, or never saw at all, is disarmed so its next appears count as startup.
+    if (dev.armed && !dev.disconnected) {
+      this.log.debug(`DEVICE connected dev=${deviceId} (already armed; no change)`);
+      return;
+    }
+    dev.armed = false;
+    dev.disconnected = false;
     this.log.info(`DEVICE connected dev=${deviceId} (disarmed until its first appear)`);
   }
 
@@ -185,6 +215,7 @@ export class SyncEngine {
     const dev = this.device(deviceId);
     const dropped = dev.pending.length;
     dev.armed = false;
+    dev.disconnected = true;
     dev.lastKnownPage = null; // it may come back on another page
     dev.pending = []; // nothing can land on an absent device
     this.log.info(`DEVICE disconnected dev=${deviceId} droppedPending=${dropped}; it is skipped by its scope until it reconnects`);
@@ -196,7 +227,7 @@ export class SyncEngine {
       seq: this.seq,
       devices: [...this.devices.values()].map((d) => ({
         ...d,
-        pending: d.pending.map(({ seq, page, profile, originId, originRole }) => ({ seq, page, profile, originId, originRole })),
+        pending: d.pending.map(({ seq, page, profile, originId, originRole, expired }) => ({ seq, page, profile, originId, originRole, expired })),
       })),
     };
   }
@@ -292,9 +323,9 @@ export class SyncEngine {
       return ignored("disabled");
     }
 
-    // 8. Parent precedence (PRD §6.3.3): a child may not lead while the parent's switch to it is still landing.
+    // 8. Parent precedence (PRD §6.3.3): a child may not lead while the parent's switch to it is still expected.
     if (member.role === "child") {
-      const parentSwitch = dev.pending.find((p) => p.originRole === "parent");
+      const parentSwitch = fresh(dev).find((p) => p.originRole === "parent");
       if (parentSwitch) {
         this.log.info(`SUPPRESSED dev=${dev.id} page=${page} scope=${scope.id} reason=parent-in-flight pending=[page=${parentSwitch.page} seq=${parentSwitch.seq}] (parent wins; its switch will land)`);
         return { classification: "SUPPRESSED", reason: "parent-in-flight", issued: [], skipped: [] };
@@ -306,44 +337,36 @@ export class SyncEngine {
   }
 
   private async receive(dev: DeviceState, page: number, entry: Pending): Promise<Outcome> {
+    const late = entry.expired;
     const stale =
       entry.seq < dev.lastSendSeq &&
       dev.lastSendPage !== null &&
       dev.lastSendPage !== page &&
-      !dev.pending.some((p) => p.page === dev.lastSendPage);
+      !fresh(dev).some((p) => p.page === dev.lastSendPage);
     if (!stale) {
-      this.log.info(`RECEIVE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId} (echo consumed; no rebroadcast)`);
-      return { classification: "RECEIVE", seq: entry.seq, issued: [], skipped: [] };
+      this.log.info(`RECEIVE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId}${late ? " late=true" : ""} (echo consumed; no rebroadcast)`);
+      return { classification: "RECEIVE", seq: entry.seq, late, issued: [], skipped: [] };
     }
     // The switch landed after this device's own later SEND: swallow it and restore the human's page.
     const restorePage = dev.lastSendPage as number;
     const seq = ++this.seq;
-    this.log.info(`RECEIVE_STALE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId} landed after this device's own send seq=${dev.lastSendSeq}; restoring page=${restorePage} seq=${seq}`);
+    this.log.info(`RECEIVE_STALE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId}${late ? " late=true" : ""} landed after this device's own send seq=${dev.lastSendSeq}; restoring page=${restorePage} seq=${seq}`);
     const profile = this.profileFor(dev.id);
     if (!profile) {
       this.log.warn(`RESTORE skipped dev=${dev.id} seq=${seq} reason=no-profile — set a profile for this device in the Page Anchor Property Inspector`);
-      return { classification: "RECEIVE_STALE", seq: entry.seq, issued: [], skipped: [{ deviceId: dev.id, reason: "no-profile" }] };
+      return { classification: "RECEIVE_STALE", seq: entry.seq, late, issued: [], skipped: [{ deviceId: dev.id, reason: "no-profile" }] };
     }
     const plan = this.issue(dev, profile, restorePage, dev.id, "self", seq);
     await plan.settled;
-    return { classification: "RECEIVE_STALE", seq: entry.seq, issued: [toIssued(plan)], skipped: [] };
+    return { classification: "RECEIVE_STALE", seq: entry.seq, late, issued: [toIssued(plan)], skipped: [] };
   }
 
   private async send(dev: DeviceState, scope: Scope, member: ScopeMember, page: number): Promise<Outcome> {
     const seq = ++this.seq;
-    dev.lastSendSeq = seq;
-    dev.lastSendPage = page;
     const plans: Plan[] = [];
     const skipped: SkippedTarget[] = [];
-
-    // Switches still heading for this device must not outlive the human's choice: re-assert it last.
-    if (dev.pending.length > 0) {
-      const profile = this.profileFor(dev.id);
-      if (profile) plans.push(this.issue(dev, profile, page, dev.id, "self", seq));
-      else skipped.push({ deviceId: dev.id, reason: "no-profile" });
-    }
-
     const from = { deviceId: dev.id, page };
+
     for (const { member: target, page: targetPage } of resolveTargets(scope, from)) {
       if (targetPage === undefined) {
         skipped.push({ deviceId: target.deviceId, reason: "no-counterpart" });
@@ -361,14 +384,20 @@ export class SyncEngine {
       }
       const state = this.device(target.deviceId);
       this.expire(state);
-      // What the device will show once its queue drains; an aligned target gets no switch (nothing to echo).
-      const willShow = state.pending.length ? state.pending[state.pending.length - 1].page : state.lastKnownPage;
+      // Where the device will be once the switches still expected to land have landed; an
+      // aligned target gets no switch (there would be nothing to echo).
+      const expected = fresh(state);
+      const willShow = expected.length ? expected[expected.length - 1].page : state.lastKnownPage;
       if (willShow === targetPage) {
         skipped.push({ deviceId: target.deviceId, reason: "already-there" });
         continue;
       }
       plans.push(this.issue(state, profile, targetPage, dev.id, member.role, seq));
     }
+
+    // Recorded once the fan-out is planned, so a failure above leaves no half-recorded send.
+    dev.lastSendSeq = seq;
+    dev.lastSendPage = page;
 
     const canonical = toCanonical(scope, from);
     const targets = plans.map((p) => `${p.deviceId}→${p.profile}#${p.page}`).join(", ");
@@ -399,12 +428,17 @@ export class SyncEngine {
 
   /** Records the switch, then issues it. The entry exists before the call so an echo can never beat it. */
   private issue(target: DeviceState, profile: string, page: number, originId: string, originRole: Origin, seq: number): Plan {
-    const entry: Pending = { seq, page, profile, originId, originRole, issuedAt: this.deps.clock.now() };
+    const entry: Pending = { seq, page, profile, originId, originRole, issuedAt: this.deps.clock.now(), expired: false };
     target.pending.push(entry);
+    while (target.pending.length > this.cap) {
+      const dropped = target.pending.shift()!;
+      this.log.debug(`GC dev=${target.id} page=${dropped.page} seq=${dropped.seq} reason=cap (${this.cap} entries)`);
+    }
     const settled = Promise.resolve()
       .then(() => this.deps.switcher.switchToProfile(target.id, profile, page))
       .then(
-        () => this.log.debug(`SWITCH ok dev=${target.id} profile=${profile} page=${page} seq=${seq} origin=${originId}`),
+        // The SDK resolves once the request is written; the landing is confirmed by the RECEIVE line.
+        () => this.log.debug(`SWITCH sent dev=${target.id} profile=${profile} page=${page} seq=${seq} origin=${originId}`),
         (err: unknown) => {
           const i = target.pending.indexOf(entry);
           if (i >= 0) target.pending.splice(i, 1);
@@ -424,17 +458,26 @@ export class SyncEngine {
     return entry;
   }
 
-  /** Drops entries that never echoed (the device was already on that page). Never consulted for classification. */
+  /**
+   * Ages pending entries. Past the TTL an entry is marked expired (warn: the switch was not
+   * confirmed) but kept as an echo tag; past the grace period it is dropped. Never consulted
+   * to classify an appear.
+   */
   private expire(dev: DeviceState): void {
     if (!dev.pending.length) return;
     const now = this.deps.clock.now();
     const keep: Pending[] = [];
     for (const p of dev.pending) {
-      if (now - p.issuedAt > this.ttl) {
-        this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=expired (no appear within ${this.ttl}ms; is there a Page Anchor on that page?)`);
-      } else {
-        keep.push(p);
+      const age = now - p.issuedAt;
+      if (age > this.grace) {
+        this.log.debug(`GC dev=${dev.id} page=${p.page} seq=${p.seq} reason=grace-elapsed (${this.grace}ms without an appear)`);
+        continue;
       }
+      if (!p.expired && age > this.ttl) {
+        p.expired = true;
+        this.log.warn(`SWITCH unconfirmed dev=${dev.id} profile=${p.profile} page=${p.page} seq=${p.seq} origin=${p.originId} — no appear within ${this.ttl}ms: the device may already have been on that page, the page may have no Page Anchor, or "${p.profile}" may not be bundled`);
+      }
+      keep.push(p);
     }
     dev.pending = keep;
   }
@@ -447,7 +490,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, lastKnownPage: null, pending: [], lastSendSeq: 0, lastSendPage: null };
+      dev = { id, armed: false, disconnected: false, lastKnownPage: null, pending: [], lastSendSeq: 0, lastSendPage: null };
       this.devices.set(id, dev);
     }
     return dev;

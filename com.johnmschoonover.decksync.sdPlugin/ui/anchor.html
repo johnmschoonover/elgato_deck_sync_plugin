@@ -27,7 +27,7 @@
 
   <div class="sdpi-heading">This marker</div>
   <div class="sdpi-item">
-    <div class="sdpi-item-label">Page index</div>
+    <label class="sdpi-item-label" for="pageIndex">Page index</label>
     <input class="sdpi-item-value" id="pageIndex" type="number" min="0" step="1" placeholder="0 = first page" />
   </div>
   <div class="sdpi-item">
@@ -56,7 +56,7 @@
     <button id="save">Save</button>
     <button id="discard">Discard changes</button>
   </div>
-  <div class="ds-block ds-status" id="status"></div>
+  <div class="ds-block ds-status" id="status" role="status" aria-live="polite"></div>
 
   <script>
     (() => {
@@ -74,6 +74,8 @@
       let draft = clone(saved);               // what the user is editing
       let dirty = false;                      // draft differs from saved
       let statusWasSaving = false;            // a Save is awaiting the plugin's reply
+      let actionUuid = null;                  // this action's UUID, from actionInfo
+      let saveTimer = null;                   // "no reply" watchdog for Save
 
       /* ---------------- Stream Deck plumbing ---------------- */
 
@@ -83,6 +85,7 @@
         let actionInfo = {};
         try { actionInfo = JSON.parse(actionInfoJson); } catch { /* leave empty */ }
         thisDeviceId = actionInfo.device ?? null;
+        actionUuid = actionInfo.action ?? null;
         hydrateMarker((actionInfo.payload && actionInfo.payload.settings) || {});
         renderThisDevice();
 
@@ -93,6 +96,14 @@
           toPlugin({ event: "getDevices" });
           toPlugin({ event: "getGlobalSettings" });
         });
+        const onDisconnected = () => {
+          clearSaveTimeout();
+          statusWasSaving = false;
+          $("save").disabled = true;
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
+        };
+        ws.addEventListener("close", onDisconnected);
+        ws.addEventListener("error", onDisconnected);
         ws.addEventListener("message", (e) => {
           let msg;
           try { msg = JSON.parse(e.data); } catch { return; }
@@ -104,31 +115,50 @@
         });
       };
 
-      function send(obj) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); }
-      function toPlugin(payload) { send({ event: "sendToPlugin", context: uuid, payload }); }
+      /** Returns false when the socket is not open (the app restarted or the panel is stale). */
+      function send(obj) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+        ws.send(JSON.stringify(obj));
+        return true;
+      }
+      function toPlugin(payload) {
+        const msg = { event: "sendToPlugin", context: uuid, payload };
+        if (actionUuid) msg.action = actionUuid;
+        return send(msg);
+      }
+      function clearSaveTimeout() {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      }
 
       function onPluginMessage(payload) {
         switch (payload.event) {
-          case "devices":
-            devices = Array.isArray(payload.devices) ? payload.devices : [];
+          case "devices": {
+            const next = Array.isArray(payload.devices) ? payload.devices : [];
+            const changed = JSON.stringify(next) !== JSON.stringify(devices);
+            devices = next;
             renderThisDevice();
-            renderSetup();
+            if (changed) renderSetup(); // a re-render discards the control being edited
             break;
+          }
           case "globalSettings":
+            clearSaveTimeout();
             saved = payload.settings || { version: 2, scopes: [] };
-            if (!dirty) draft = clone(saved);
-            renderSetup();
+            if (statusWasSaving || !dirty) {
+              draft = clone(saved);
+              dirty = false;
+              renderSetup();
+            }
             if (payload.issues && payload.issues.length) {
               setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
-            } else if (dirty === false && statusWasSaving) {
+            } else if (statusWasSaving) {
               setStatus("Saved.", "ok");
             }
             statusWasSaving = false;
             break;
           case "globalSettingsRejected":
-            dirty = true; // keep the user's edits so they can fix them
+            clearSaveTimeout();
+            statusWasSaving = false; // the draft stays dirty so the user can fix it
             setStatus("Not saved:\n" + issuesText(payload.issues || []), "err");
-            statusWasSaving = false;
             break;
         }
       }
@@ -144,11 +174,22 @@
       }
 
       function saveMarker() {
-        const raw = $("pageIndex").value.trim();
+        const input = $("pageIndex");
+        const raw = input.value.trim();
         const n = Number(raw);
+        const valid = raw === "" || (Number.isInteger(n) && n >= 0);
+        input.setAttribute("aria-invalid", valid ? "false" : "true");
+        if (!valid) {
+          setStatus("Page index must be a whole number, 0 or more. Not saved.", "err");
+          return;
+        }
         const payload = { enabled: $("enabled").checked };
-        if (raw !== "" && Number.isInteger(n) && n >= 0) payload.pageIndex = n;
-        send({ event: "setSettings", context: uuid, payload });
+        if (raw !== "") payload.pageIndex = n;
+        if (!send({ event: "setSettings", context: uuid, payload })) {
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
+          return;
+        }
+        if ($("status").textContent.startsWith("Page index")) setStatus("", "");
       }
       $("pageIndex").addEventListener("input", saveMarker);
       $("enabled").addEventListener("change", saveMarker);
@@ -261,17 +302,18 @@
         const ids = allDeviceIds();
         if (!ids.length) {
           root.append(el("div", { class: "ds-muted" }, "No Stream Deck devices known yet."));
+          for (const scope of draft.scopes) root.append(renderScope(scope));
           return;
         }
 
-        // Device table: device | scope | role | profile
+        // Device table: device | scope | role | profile | pages
         const table = el("table", { class: "ds-table" },
           el("thead", {}, el("tr", {}, el("th", {}, "Device"), el("th", {}, "Scope"), el("th", {}, "Role"), el("th", {}, "Profile"), el("th", {}, "Pages"))));
         const tbody = el("tbody");
         for (const id of ids) {
           const scope = scopeOf(id);
           const member = memberOf(id);
-          const scopeSelect = el("select", { onchange: change((ev) => {
+          const scopeSelect = el("select", { "aria-label": `Scope for ${deviceName(id)}`, onchange: change((ev) => {
             const v = ev.target.value;
             if (v === "") removeFromScope(id);
             else if (v === "__new") assignToScope(id, addScope());
@@ -280,17 +322,17 @@
             option("", "— not synced —", !scope),
             ...draft.scopes.map((s) => option(s.id, s.name || s.id, scope && scope.id === s.id)),
             option("__new", "New scope…", false));
-          const roleSelect = el("select", { disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
+          const roleSelect = el("select", { "aria-label": `Role of ${deviceName(id)}`, disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
             option("parent", "Parent", member && member.role === "parent"),
             option("child", "Child", member && member.role === "child"));
           const profileInput = el("input", {
-            type: "text", disabled: !member,
+            type: "text", disabled: !member, "aria-label": `Profile for ${deviceName(id)}`,
             placeholder: defaultProfile(id) || (member ? "required for this device type" : ""),
             value: member && member.profile ? member.profile : "",
             oninput: (ev) => { if (member) { member.profile = ev.target.value.trim() || undefined; markDirty(); } },
           });
           const pagesInput = el("input", {
-            class: "ds-page", type: "number", min: "1", step: "1", disabled: !member, placeholder: "5",
+            class: "ds-page", type: "number", min: "1", step: "1", disabled: !member, placeholder: "5", "aria-label": `Page count of ${deviceName(id)}`,
             value: member && member.pageCount ? String(member.pageCount) : "",
             oninput: (ev) => {
               if (!member) return;
@@ -321,7 +363,7 @@
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
-          el("input", { type: "text", value: scope.name, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
+          el("input", { type: "text", value: scope.name, "aria-label": "Scope name", oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
           el("button", { class: "ds-fixed", onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); }) }, "Remove scope")));
 
         if (parent && children.length) {
@@ -337,15 +379,20 @@
       }
 
       function renderOverride(scope, parent, children, o, index) {
-        const pageInput = (ref) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page),
-          oninput: (ev) => { const n = Number(ev.target.value); if (Number.isInteger(n) && n >= 0) { ref.page = n; markDirty(); } } });
+        const pageInput = (ref, label) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": label,
+          oninput: (ev) => {
+            const raw = ev.target.value.trim();
+            if (raw === "") return; // mid-edit: keep the previous value until a number is typed
+            const n = Number(raw);
+            if (Number.isInteger(n) && n >= 0) { ref.page = n; markDirty(); }
+          } });
         return el("div", { class: "ds-row" },
-          el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a),
+          el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a, "Parent page"),
           el("span", { class: "ds-fixed" }, "↔"),
-          el("select", { onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
+          el("select", { "aria-label": "Child device", onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
             ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
-          el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b),
-          el("button", { class: "ds-fixed", onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
+          el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page"),
+          el("button", { class: "ds-fixed", "aria-label": "Remove override", onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
       }
 
       /* ---------------- save / discard ---------------- */
@@ -353,10 +400,18 @@
       $("addScope").addEventListener("click", change(() => { addScope(); }));
       $("save").addEventListener("click", () => {
         for (const s of draft.scopes) syncParentId(s);
-        statusWasSaving = true;
-        dirty = false;
+        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } })) {
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
+          return;
+        }
+        statusWasSaving = true; // the draft stays dirty until the plugin confirms
         setStatus("Saving…", "");
-        toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } });
+        clearSaveTimeout();
+        saveTimer = setTimeout(() => {
+          if (!statusWasSaving) return;
+          statusWasSaving = false;
+          setStatus("No reply from the plugin — is it running? Try Save again.", "err");
+        }, 5000);
       });
       $("discard").addEventListener("click", () => {
         draft = clone(saved);

@@ -68,6 +68,8 @@ export type ValidatedSettings = {
   settings: GlobalSettings;
   /** Everything wrong with the input; empty when the input was fully valid. */
   issues: SettingsIssue[];
+  /** True when the input as a whole was unusable (not an object, wrong version, scopes not an array). */
+  fatal: boolean;
 };
 
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -90,21 +92,21 @@ export function validateGlobalSettings(input: unknown): ValidatedSettings {
   const settings = createDefaultGlobalSettings();
 
   if (input === undefined || input === null || (isObject(input) && Object.keys(input).length === 0)) {
-    return { settings, issues };
+    return { settings, issues, fatal: false };
   }
   if (!isObject(input)) {
     issues.push({ message: `Global settings must be an object; got ${typeof input}. Using defaults.` });
-    return { settings, issues };
+    return { settings, issues, fatal: true };
   }
   if (input.version !== GLOBAL_SETTINGS_VERSION) {
     issues.push({
       message: `Unsupported global settings version ${JSON.stringify(input.version)}; expected ${GLOBAL_SETTINGS_VERSION}. Reconfigure Deck Sync in the Page Anchor settings.`,
     });
-    return { settings, issues };
+    return { settings, issues, fatal: true };
   }
   if (!Array.isArray(input.scopes)) {
     issues.push({ message: "Global settings: 'scopes' must be an array. Using no scopes." });
-    return { settings, issues };
+    return { settings, issues, fatal: true };
   }
 
   const seenScopeIds = new Set<string>();
@@ -135,7 +137,7 @@ export function validateGlobalSettings(input: unknown): ValidatedSettings {
     issues.push(...result.issues);
   });
 
-  return { settings, issues };
+  return { settings, issues, fatal: false };
 }
 
 function validateScope(raw: unknown, index: number): { scope?: Scope; issues: SettingsIssue[] } {

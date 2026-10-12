@@ -6,11 +6,7 @@
     "strict": true,
     "skipLibCheck": true,
     "outDir": "./dist-test",
-    "rootDir": "./src",
-    "baseUrl": ".",
-    "paths": {
-      "@elgato/utils": ["src/tests/__mocks__/@elgato/utils.ts"]
-    }
+    "rootDir": "./src"
   },
   "include": ["src/**/*"]
 }

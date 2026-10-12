@@ -47,7 +47,7 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
     try {
       await streamDeck.ui.sendToPropertyInspector(msg as JsonValue);
     } catch (err) {
-      log.debug(`PI: could not send '${msg.event}' (${describeError(err)})`);
+      log.warn(`PI: could not send '${msg.event}' (${describeError(err)}) — reopen the Page Anchor's Property Inspector`);
     }
   };
   const pushDevices = () => void send({ event: "devices", devices: listDevices() });

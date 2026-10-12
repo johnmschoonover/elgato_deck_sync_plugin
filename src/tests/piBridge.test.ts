@@ -24,7 +24,10 @@ jest.mock("@elgato/streamdeck", () => ({
     },
     ui: {
       onSendToPlugin: (l: (ev: unknown) => Promise<void>) => { mockState.listeners.sendToPlugin = l; },
-      sendToPropertyInspector: jest.fn(async (p: unknown) => { mockState.sent.push(p); }),
+      sendToPropertyInspector: jest.fn(async (p: unknown) => {
+        if ((mockState as unknown as { failSend?: boolean }).failSend) throw new Error("no property inspector");
+        mockState.sent.push(p);
+      }),
     },
   },
 }));
@@ -41,6 +44,12 @@ const validSettings = {
   scopes: [{ id: "desk", name: "Desk", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }], mapping: { mode: "positional", overrides: [] } }],
 };
 
+/** What the PI must receive for the mocked devices (spelled out, not computed by the code under test). */
+const DEVICE_LIST = [
+  { id: "P", name: "Deck P", type: 0, isConnected: true, defaultProfile: "profiles/original" },
+  { id: "C1", name: "Deck C1", type: 7, isConnected: false },
+];
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockState.stored = {};
@@ -52,16 +61,13 @@ beforeEach(() => {
 
 describe("listDevices", () => {
   test("summarizes devices with the default profile for known device types", () => {
-    expect(listDevices()).toEqual([
-      { id: "P", name: "Deck P", type: 0, isConnected: true, defaultProfile: "profiles/original" },
-      { id: "C1", name: "Deck C1", type: 7, isConnected: false },
-    ]);
+    expect(listDevices()).toEqual(DEVICE_LIST);
   });
 });
 
 describe("loadGlobalSettings", () => {
   test("fresh install yields defaults without warnings", async () => {
-    await expect(loadGlobalSettings(log)).resolves.toEqual({ settings: createDefaultGlobalSettings(), issues: [] });
+    await expect(loadGlobalSettings(log)).resolves.toEqual({ settings: createDefaultGlobalSettings(), issues: [], fatal: false });
     expect(log.warn).not.toHaveBeenCalled();
   });
 
@@ -84,7 +90,7 @@ describe("loadGlobalSettings", () => {
 describe("Property Inspector messages", () => {
   test("getDevices replies with the device list", async () => {
     await message({ event: "getDevices" });
-    expect(mockState.sent).toEqual([{ event: "devices", devices: listDevices() }]);
+    expect(mockState.sent).toEqual([{ event: "devices", devices: DEVICE_LIST }]);
   });
 
   test("getGlobalSettings replies with validated settings and issues", async () => {
@@ -128,6 +134,13 @@ describe("Property Inspector messages", () => {
     mockState.listeners.connect!();
     mockState.listeners.disconnect!();
     await Promise.resolve();
-    expect(mockState.sent).toEqual([{ event: "devices", devices: listDevices() }, { event: "devices", devices: listDevices() }]);
+    expect(mockState.sent).toEqual([{ event: "devices", devices: DEVICE_LIST }, { event: "devices", devices: DEVICE_LIST }]);
+  });
+
+  test("a reply that cannot be delivered is logged at warn, not thrown", async () => {
+    (mockState as unknown as { failSend: boolean }).failSend = true;
+    await expect(message({ event: "getDevices" })).resolves.toBeUndefined();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("could not send 'devices'"));
+    (mockState as unknown as { failSend: boolean }).failSend = false;
   });
 });

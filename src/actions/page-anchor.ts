@@ -1,4 +1,5 @@
 import { action, SingletonAction, type WillAppearEvent, type WillDisappearEvent } from "@elgato/streamdeck";
+import { ANCHOR_ACTION_UUID } from "../ids";
 import { normalizeAnchorSettings, type AnchorSettings } from "../settings";
 import type { AppearInput, SyncEngine } from "../syncEngine";
 
@@ -7,7 +8,7 @@ import type { AppearInput, SyncEngine } from "../syncEngine";
  * identity and an enabled flag (PRD §6.5) and reports appear/disappear to the
  * sync engine, which decides whether a page change is a SEND or a RECEIVE.
  */
-@action({ UUID: "com.johnmschoonover.decksync.anchor" })
+@action({ UUID: ANCHOR_ACTION_UUID })
 export class PageAnchorAction extends SingletonAction<AnchorSettings> {
   constructor(private readonly engine: SyncEngine) {
     super();

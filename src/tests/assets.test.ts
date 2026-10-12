@@ -4,13 +4,15 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ANCHOR_ACTION_UUID, PLUGIN_UUID } from "../ids";
 
 const PLUGIN_DIR = join(__dirname, "..", "..", "com.johnmschoonover.decksync.sdPlugin");
 
 interface ManifestShape {
+  UUID: string;
   Icon: string;
   CategoryIcon?: string;
-  Actions: Array<{ Icon: string; States: Array<{ Image: string }> }>;
+  Actions: Array<{ UUID: string; Icon: string; States: Array<{ Image: string }> }>;
 }
 
 const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, "manifest.json"), "utf8")) as ManifestShape;
@@ -34,6 +36,18 @@ function pngSize(file: string): { width: number; height: number } {
   expect(buf.subarray(12, 16).toString("ascii")).toBe("IHDR");
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
 }
+
+describe("manifest identifiers", () => {
+  test("the plugin folder and manifest UUID match src/ids.ts", () => {
+    expect(PLUGIN_DIR.endsWith(`${PLUGIN_UUID}.sdPlugin`)).toBe(true);
+    expect(manifest.UUID).toBe(PLUGIN_UUID);
+  });
+
+  test("the Page Anchor action UUID is registered in the manifest under the plugin UUID", () => {
+    expect(manifest.Actions.map((a) => a.UUID)).toContain(ANCHOR_ACTION_UUID);
+    for (const a of manifest.Actions) expect(a.UUID.startsWith(`${PLUGIN_UUID}.`)).toBe(true);
+  });
+});
 
 describe("manifest image assets", () => {
   test.each(expected)("$what ($path) is $size px with an @2x variant", ({ path, size }) => {

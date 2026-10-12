@@ -238,27 +238,41 @@ This is the heart of v1 behavior and **MUST** be implemented exactly:
 
 ## 8. Current Repository State & Known Gaps
 
-_Last refreshed October 2026._ Epic A1, B1–B2 and C1–C5 have landed on `main`; the build, `tsc --noEmit` and the Jest suite are green. Spike-1 test scaffolding exists (`src/SPIKE1_FINDINGS.ts`) but its hardware result is still pending. Remaining gaps:
+_Last refreshed October 2026 (branch `claude/zealous-goodall-40x7d5`)._ Every **[agent]** item in Epics A–C, B4 and E1–E3 has landed: placeholder icons and the official validator in CI (A2), the §6.5 settings schema with warn-not-throw validation and parent-canonical mapping (B1–B2), the Page Anchor reduced to `pageIndex` + `enabled` with PI hydration fixed (B3), a working configuration UI (B4), the causal sync engine with echo tagging, parent precedence, startup guard, fan-out and logging (C1–C5, design in `docs/SYNC_ENGINE.md`), a Jest suite covering every [agent] AC, CI, README and license. Build, `tsc --noEmit`, `streamdeck validate` and the suite are green.
+
+An earlier revision of this section recorded B1–B2 and C1–C5 as landed; that code implemented a named-profile broadcast with a 2-second timer debounce rather than §6.3 and was replaced wholesale.
 
 ### 8.1 RESOLVED — build fails (`ws` not bundleable)
 
 Fixed by adding `@rollup/plugin-commonjs` to the Rollup config (§7.1).
 
-### 8.2 BLOCKER — missing icon assets
+### 8.2 RESOLVED (placeholders) — icon assets
 
-`manifest.json` references `imgs/plugin/category-icon`, `imgs/plugin/marketplace`, `imgs/actions/anchor/icon`, `imgs/actions/anchor/key`; no `imgs/` directory exists. Plugin won't validate/load until placeholders (correct sizes + `@2x`) are added (§7.7).
+`scripts/make-placeholder-icons.mjs` generates every manifest image at the §7.7 sizes with `@2x` variants; `npm run validate` (the official `streamdeck validate`) passes and runs in CI. Final artwork remains Epic E4.
 
-### 8.3 BUG — Property Inspector does not load saved settings
+### 8.3 RESOLVED — Property Inspector hydration
 
-`ui/anchor.html` handles `didReceiveSettings` but never requests settings on connect nor reads the `inActionInfo` payload Stream Deck passes on load, so a configured marker can open blank. Fix to hydrate from `actionInfo.payload.settings` (and/or request settings on connect). Consider migrating to the official PI SDK / `sdpi-components` (§10 OQ-9).
+`ui/anchor.html` hydrates from the `actionInfo` payload Stream Deck passes on connect and from `didReceiveSettings`. It stays hand-rolled (OQ-9's fallback); the global configuration UI lives in the same PI because Stream Deck has no plugin-level settings page.
 
-### 8.4 Legacy per-anchor target fields
+### 8.4 RESOLVED — legacy per-anchor target fields
 
-`page-anchor.ts` still honours the old `targetDeviceId`/`targetProfile` fields as a fallback path. They are to be replaced by `pageIndex` + global-settings-driven resolution (§6.5, task B3); don't extend them.
+Removed. Anchors store `pageIndex` + `enabled`; legacy fields are ignored.
 
-### 8.5 Not yet verified on hardware
+### 8.5 OPEN — bundled profiles (D1, **[gate]**)
 
-Plugin load (A3), real sync behaviour, startup guard, bundled profile install (D1–D3) and Spike-1 all still need a **[gate]** pass.
+No bundled profiles exist. The four hand-written JSON files previously in `profiles/` could never install (exported profiles are zip archives) and were removed with their manifest entries so the plugin validates and loads cleanly. Until John exports real profiles per `docs/PROFILES.md`, every switch fails with a `SWITCH failed … profile` warning — sync cannot be exercised on hardware before D1. The engine's default profile names (`profiles/original|mini|xl|neo`) match the names that document specifies.
+
+### 8.6 Implementation decisions to ratify at the next gate
+
+- **Overrides pair a parent page with a child page** (§6.4's example); child↔child mapping is derived through the parent's page, and a pinned page has no positional counterpart, so mappings are one-to-one in both directions. Two independent designs chose this; it is validated in `src/settings.ts`.
+- **`pageCount` per scope member** (default 5 per OQ-2) bounds positional mapping so the engine never targets a page a profile does not have.
+- **No settle window.** The startup guard is a per-device armed flag: the first appear after start or (re)connect never syncs.
+- **Stale-switch handling.** A switch that lands after a device's own later send is swallowed and the page restored; a send from a device with switches still heading for it re-asserts its page. This is how "a parent's SEND overrides anything in flight" is realised (`docs/SYNC_ENGINE.md`).
+- No Stream Deck + profile is in the §7.4 list although §6.6's example uses an SD+ as parent; with an SD+ in a scope its `profile` must be set explicitly until one is bundled.
+
+### 8.7 Not yet verified on hardware
+
+Plugin load (A3), configuration persistence (B gate), real sync behaviour, startup guard, parent precedence, bundled profile install (D1–D3) and Spike-1 all still need a **[gate]** pass — steps in `docs/MANUAL_TESTS.md` and `docs/SPIKE1.md`.
 
 ## 9. Sequenced Build Plan (epics)
 

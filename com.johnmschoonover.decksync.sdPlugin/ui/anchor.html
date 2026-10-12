@@ -88,6 +88,9 @@
       let focusNext = null;                   // where the keyboard focus goes after the next re-render
       const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
       const collapsed = new Set();            // scope ids the user collapsed
+      const overrideIds = new WeakMap();      // override object → stable id, so a removed row's invalid text never lands on its successor
+      let overrideSeq = 0;
+      const overrideId = (o) => { if (!overrideIds.has(o)) overrideIds.set(o, ++overrideSeq); return overrideIds.get(o); };
 
       /* ---------------- Stream Deck plumbing ---------------- */
 
@@ -188,9 +191,11 @@
             if (confirmed && payload.id !== pendingSaveId) break;
             saved = payload.settings || { version: 2, scopes: [] };
             let editedMeanwhile = false;
+            let applied = confirmed; // a confirmation always reports its problems; a plain load only when it was adopted
             if (!loaded) {
               // The first load is authoritative: nothing edited before it can be trusted.
               loaded = true;
+              applied = true;
               initialStateArrived();
               $("save").disabled = false;
               $("addScope").disabled = false;
@@ -213,9 +218,10 @@
               }
             } else if (!dirty && pendingSaveId === null) {
               draft = clone(saved); // a reload while nothing is being edited or saved
+              applied = true;
               renderSetup();
             }
-            if (payload.issues && payload.issues.length) {
+            if (applied && payload.issues && payload.issues.length) {
               setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
             } else if (confirmed) {
               setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
@@ -405,7 +411,8 @@
           renderSetupInto(root);
           for (const [key, text] of invalidText) {
             const box = document.querySelector(`[data-focus="${CSS.escape(key)}"]`);
-            if (box) { box.value = text; box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
+            // A box that is gone or disabled (its device unassigned) cannot be fixed, so it must not block Save.
+            if (box && !box.disabled) { box.value = text; box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
           }
         } finally {
           if (focused) {
@@ -537,7 +544,7 @@
       }
 
       function renderOverride(scope, parent, children, o, index) {
-        const key = (part) => `ov:${scope.id}:${index}:${part}`;
+        const key = (part) => `ov:${scope.id}:${overrideId(o)}:${part}`;
         const row = `override ${index + 1} of ${scope.id}`; // accessible names must tell the rows apart
         const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": `${label} (${row})`, "data-focus": key(part),
           oninput: (ev) => {
@@ -562,8 +569,17 @@
         for (const input of $("setup").querySelectorAll('input[data-focus^="ov:"]')) {
           if (input.value.trim() === "") input.setAttribute("aria-invalid", "true");
         }
-        if ($("setup").querySelector('[aria-invalid="true"]')) {
-          setStatus("Fix the highlighted fields first.", "err");
+        const bad = $("setup").querySelector('[aria-invalid="true"]');
+        if (bad) {
+          // The field may sit in a collapsed scope: open it, move the focus there and name it.
+          const section = bad.closest("details");
+          if (section && !section.open) {
+            section.open = true;
+            const summary = section.querySelector("[data-scope-summary]");
+            if (summary) collapsed.delete(summary.dataset.scopeSummary);
+          }
+          bad.focus();
+          setStatus(`Fix the highlighted fields first: ${bad.getAttribute("aria-label") || "a field"}.`, "err");
           return;
         }
         // A scope nobody belongs to (Add scope, or every member removed) has nothing to save.
@@ -595,6 +611,8 @@
         draft = clone(saved);
         dirty = false;
         invalidText.clear();
+        const active = document.activeElement;
+        if (active && $("setup").contains(active)) active.blur(); // text being typed is discarded too, not carried across the re-render
         if (pendingSaveId !== null) {
           // The save already went out and cannot be taken back; its confirmation is adopted as is.
           pendingSave = null;

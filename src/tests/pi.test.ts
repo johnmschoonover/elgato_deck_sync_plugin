@@ -294,7 +294,7 @@ describe("setup: scopes, roles, overrides", () => {
     setInput(byLabel("Child page (override 1 of scope-1)"), "4");
     setInput(byLabel("Child page (override 1 of scope-1)"), ""); // mid-edit blank keeps the draft's 4 but must not be saved as such
     $("save").click();
-    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(status()).toMatch(/^Fix the highlighted fields first: /);
     expect(byLabel("Child page (override 1 of scope-1)").getAttribute("aria-invalid")).toBe("true");
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
     setInput(byLabel("Child page (override 1 of scope-1)"), "3");
@@ -368,7 +368,7 @@ describe("setup: scopes, roles, overrides", () => {
     expect(pages.value).toBe("0");
     expect(pages.getAttribute("aria-invalid")).toBe("true");
     $("save").click();
-    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(status()).toMatch(/^Fix the highlighted fields first: /);
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
     setInput(byLabel("Page count of Deck P"), "6");
     select(byLabel("Role of Deck P"), "parent"); // re-renders again: the fixed value is in the draft, nothing is flagged
@@ -439,8 +439,63 @@ describe("setup: scopes, roles, overrides", () => {
     expect(again.getAttribute("aria-invalid")).toBe("true");
     expect(document.activeElement).toBe(again);
     $("save").click();
-    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(status()).toMatch(/^Fix the highlighted fields first: /);
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+  });
+
+  test("R10-F7 invalid page-count text does not follow a device out of its scope: the disabled box never blocks Save", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Page count of Deck P"), "0");
+    expect(byLabel("Page count of Deck P").getAttribute("aria-invalid")).toBe("true");
+    select(byLabel("Scope for Deck P"), ""); // — not synced —
+    const box = byLabel<HTMLInputElement>("Page count of Deck P");
+    expect(box.disabled).toBe(true);
+    expect(box.getAttribute("aria-invalid")).not.toBe("true");
+    $("save").click();
+    expect(status()).toBe("Saving…");
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(1);
+  });
+
+  test("R10-F8 removing an override row does not hand its invalid text to the row that takes its place", () => {
+    const ws = loadedPanel();
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Parent page (override 2 of scope-1)"), "3");
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "-1");
+    expect(byLabel("Parent page (override 1 of scope-1)").getAttribute("aria-invalid")).toBe("true");
+    byLabel<HTMLButtonElement>("Remove override 1 of scope-1").click();
+    const survivor = byLabel<HTMLInputElement>("Parent page (override 1 of scope-1)");
+    expect(survivor.value).toBe("3"); // the other row, renumbered, with its own value
+    expect(survivor.getAttribute("aria-invalid")).not.toBe("true");
+    $("save").click();
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(1);
+  });
+
+  test("R10-F9 a Save blocked by a field inside a collapsed scope opens the scope, focuses the field and names it", () => {
+    const ws = loadedPanel();
+    byFocus<HTMLButtonElement>("addov:scope-1").click();
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "-1");
+    const section = document.querySelector<HTMLDetailsElement>("details.ds-scope")!;
+    section.open = false;
+    $("save").click();
+    expect(status()).toBe("Fix the highlighted fields first: Parent page (override 1 of scope-1).");
+    expect(document.querySelector<HTMLDetailsElement>("details.ds-scope")!.open).toBe(true);
+    expect(document.activeElement).toBe(byLabel("Parent page (override 1 of scope-1)"));
+    expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
+    setInput(byLabel("Parent page (override 1 of scope-1)"), "1");
+    select(byLabel("Role of Deck P"), "parent"); // a re-render keeps the scope open
+    expect(document.querySelector<HTMLDetailsElement>("details.ds-scope")!.open).toBe(true);
+  });
+
+  test("R10-F10 a late load reply with problems does not overwrite 'Saving…' while a save is pending", () => {
+    const ws = loadedPanel();
+    setInput(byLabel("Name of scope-1"), "Edited");
+    $("save").click();
+    ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [{ scopeId: "bad", message: "Scope 'bad' ignored: x" }] }); // a slow initial-load retry, no id
+    expect(status()).toBe("Saving…");
+    expect(byLabel<HTMLInputElement>("Name of scope-1").value).toBe("Edited");
+    ws.fromPlugin({ event: "globalSettings", settings: SAVED, issues: [{ scopeId: "bad", message: "Scope 'bad' ignored: x" }], id: lastSaveId(ws) }); // the confirmation reports its problems
+    expect(status()).toBe("Saved settings had problems; invalid scopes were ignored:\n• Scope 'bad' ignored: x");
   });
 
   test("R6-F8 a rejected save leaves the override rows pointing at the right overrides, stale ones included", () => {
@@ -475,7 +530,7 @@ describe("setup: scopes, roles, overrides", () => {
     expect(byLabel("Page count of Deck P").getAttribute("aria-invalid")).toBe("true");
     expect(status()).toBe("Pages must be a whole number, 1 or more.");
     $("save").click();
-    expect(status()).toBe("Fix the highlighted fields first.");
+    expect(status()).toMatch(/^Fix the highlighted fields first: /);
     expect(ws.toPlugin("setGlobalSettings")).toHaveLength(0);
     setInput(byLabel("Page count of Deck P"), "8");
     byFocus<HTMLButtonElement>("addov:scope-1").click();

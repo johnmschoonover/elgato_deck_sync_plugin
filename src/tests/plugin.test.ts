@@ -84,10 +84,15 @@ afterEach(() => jest.useRealTimers());
 
 test("registers the action before connecting, starts after connect, and drives the SDK through the adapters", async () => {
   let resolveConnect = () => {};
-  mock.connect = () => new Promise<void>((resolve) => { resolveConnect = resolve; });
+  let registeredAtConnect = -1;
+  mock.connect = () => {
+    registeredAtConnect = mock.registered.length; // what the SDK knows at the moment connect() is called
+    return new Promise<void>((resolve) => { resolveConnect = resolve; });
+  };
   mock.stored = scopeSettings("Desk");
   jest.isolateModules(() => { require("../plugin"); });
   expect(mock.registered).toHaveLength(1);
+  expect(registeredAtConnect).toBe(1);
   expect((mock.registered[0] as object).constructor.name).toBe(PageAnchorAction.name); // isolateModules gives the class a fresh identity
   expect(lines("sync", /^START/)).toHaveLength(0);
 

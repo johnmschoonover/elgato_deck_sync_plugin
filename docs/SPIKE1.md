@@ -30,7 +30,8 @@ visible (`com.johnmschoonover.decksync.sdPlugin/logs/`).
    Anchor with *Page index* `9` and *Enabled* **off** (so it never SENDs). Expected log lines,
    in order: the warn `IGNORED dev=<child> action=… reason=no-page-index — …` when the anchor
    is placed; `ANCHOR updated dev=<child> … page=none→9 enabled=true (no sync)` when the index
-   is typed and `… page=9→9 enabled=false …` when *Enabled* is switched off (separate saves).
+   edit is finished (Tab or a click elsewhere) and `… page=9→9 enabled=false …` when *Enabled*
+   is switched off (separate saves).
    The edits record the child as being on page 9, so leave the folder before step 2; leaving
    it logs one `SEND dev=<child> … page=0 …` (the page-0 anchor reappears: a correct human
    navigation back to page 0, the parent skipped as `already-there` if it is still on 0).

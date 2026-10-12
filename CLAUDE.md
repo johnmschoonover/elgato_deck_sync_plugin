@@ -20,7 +20,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 ├── PRD.md                                   # product spec (normative)
 ├── CLAUDE.md                                # this file
 ├── README.md                                # user guide: install, configure, read the log, troubleshoot
-├── LICENSE / .gitignore                     # MIT; bin/, logs/ and node_modules/ are ignored
+├── LICENSE / .gitignore                     # MIT; node_modules/, bin/, logs/, coverage/ and *.js.map are ignored
 ├── .claude/                                 # cloud-session settings + SessionStart hook (npm ci)
 ├── .github/workflows/ci.yml                 # typecheck + build + validate + test
 ├── docs/

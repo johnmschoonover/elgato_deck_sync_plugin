@@ -155,6 +155,12 @@ export class SyncEngine {
   }
 
   private applySettings(settings: GlobalSettings, why: "start" | "update"): void {
+    // The global-settings event also fires for plain reads (e.g. when the PI opens); a
+    // reload that changes nothing must not drop switches in flight.
+    if (why === "update" && JSON.stringify(settings) === JSON.stringify(this.settings)) {
+      this.log.debug("SETTINGS unchanged; keeping state");
+      return;
+    }
     this.settings = settings;
     this.notedNoScope.clear();
     // Pending switches were issued under the old topology; their origins mean nothing now.

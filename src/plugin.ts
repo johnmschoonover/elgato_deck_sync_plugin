@@ -1,18 +1,52 @@
 import streamDeck from "@elgato/streamdeck";
 import { PageAnchorAction } from "./actions/page-anchor";
-import { registerPropertyInspectorBridge } from "./piBridge";
+import { describeError } from "./log";
+import { loadGlobalSettings, logIssues, registerPropertyInspectorBridge } from "./piBridge";
+import { validateGlobalSettings } from "./settings";
+import { SyncEngine, type DeviceInfo } from "./syncEngine";
 
 const log = streamDeck.logger.createScope("DeckSync");
 
-// Register all actions before connecting.
-streamDeck.actions.registerAction(new PageAnchorAction());
+const toInfo = (d: { id: string; name: string; type: number; isConnected: boolean }): DeviceInfo => ({
+  id: d.id,
+  name: d.name,
+  type: d.type,
+  isConnected: d.isConnected,
+});
 
-// Property Inspector: device list + global settings load/save.
-registerPropertyInspectorBridge({
-  log,
-  onSettingsSaved: () => {
-    // The sync engine is re-pointed at the saved settings once it lands (Epic C / B3).
+// The engine sees the SDK only through these adapters (src/syncEngine.ts).
+const engine = new SyncEngine({
+  switcher: { switchToProfile: (deviceId, profile, page) => streamDeck.profiles.switchToProfile(deviceId, profile, page) },
+  clock: { now: () => Date.now() },
+  log: streamDeck.logger.createScope("sync"),
+  devices: {
+    list: () => [...streamDeck.devices].map(toInfo),
+    get: (id) => {
+      const d = streamDeck.devices.getDeviceById(id);
+      return d && toInfo(d);
+    },
   },
 });
 
-streamDeck.connect();
+// Register all actions before connecting.
+streamDeck.actions.registerAction(new PageAnchorAction(engine));
+
+streamDeck.devices.onDeviceDidConnect((ev) => engine.onDeviceConnected(ev.device.id));
+streamDeck.devices.onDeviceDidDisconnect((ev) => engine.onDeviceDisconnected(ev.device.id));
+
+// Settings reach the engine validated: from the PI's save, or from the global-settings event.
+streamDeck.settings.onDidReceiveGlobalSettings((ev) => {
+  const { settings, issues } = validateGlobalSettings(ev.settings);
+  logIssues(log, issues);
+  engine.onSettingsChanged(settings);
+});
+registerPropertyInspectorBridge({ log, onSettingsSaved: (settings) => engine.onSettingsChanged(settings) });
+
+streamDeck
+  .connect()
+  .then(async () => {
+    // Devices are known only after connecting; start never issues a switch.
+    const { settings } = await loadGlobalSettings(log);
+    engine.start(settings);
+  })
+  .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

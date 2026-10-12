@@ -327,7 +327,10 @@ describe("edge cases", () => {
     await h.boot();
     h.leave("P", 0);
     await h.appear("P", 2); // C1#4, C2#2 pending
-    h.engine.onSettingsChanged(h.settings);
+    h.engine.onSettingsChanged(h.settings); // a reload that changes nothing (the PI opened) keeps state
+    expect(h.pendingPages("C1")).toEqual([4]);
+    expect(h.log.find("debug", /^SETTINGS unchanged/)).toHaveLength(1);
+    h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" })));
     for (const dev of ["C1", "C2"]) expect(h.pendingPages(dev)).toEqual([]);
     expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([2, 0, 0]);
     expect(h.engine.snapshot().devices.every((d) => d.armed)).toBe(true);

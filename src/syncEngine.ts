@@ -19,14 +19,17 @@
  *   (re)connect arms the device and never syncs (PRD §4.4). No settle window.
  * - Parent precedence: a child's human navigation while a parent-issued
  *   switch to it is still expected is SUPPRESSED; a parent's never is. A
- *   switch that lands on a device after that device's own later SEND is
- *   stale: swallowed, and the device restored to its human page.
+ *   still-expected switch that lands on a device after that device's own
+ *   later human navigation is stale: swallowed, and the device restored to
+ *   the human's page — unless a later switch is already heading there.
  * - Time never classifies an appear. After `pendingTtlMs` an unconfirmed
- *   entry is marked expired: it no longer suppresses a child or counts as
- *   where the device will be, but it remains an echo tag, so a late landing
- *   is still a RECEIVE. Expired entries are dropped after `pendingGraceMs`
- *   (bounded memory), when a later switch to the device lands, or when the
- *   device disconnects.
+ *   entry is marked expired: it no longer suppresses a child, counts as where
+ *   the device will be, or triggers a restore, but it remains an echo tag,
+ *   so a late landing is still a RECEIVE. Expired entries are dropped after
+ *   `pendingGraceMs` (bounded memory), when a later switch to the device
+ *   lands, or when the device disconnects.
+ * - A send-storm breaker caps how often one device may SEND in a short
+ *   window; it is a circuit breaker for misconfigured anchors, not a classifier.
  */
 import { resolveTargets, toCanonical } from "./mapping";
 import type { Log } from "./log";
@@ -60,12 +63,16 @@ export interface DeviceDirectory {
 export type EngineDeps = { switcher: Switcher; clock: Clock; log: Log; devices: DeviceDirectory };
 
 export type EngineOptions = {
-  /** After this long without an appear a pending switch stops suppressing/predicting (default 3000 ms). */
+  /** After this long without an appear a pending switch stops suppressing/predicting/restoring (default 3000 ms). */
   pendingTtlMs?: number;
   /** An expired entry stays an echo tag this long after it was issued (default 30000 ms). */
   pendingGraceMs?: number;
   /** Hard cap on entries kept per device (default 50). */
   maxPendingPerDevice?: number;
+  /** More than this many SENDs from one device within `sendStormWindowMs` trips the breaker (default 6). */
+  sendStormMax?: number;
+  /** Window for the send-storm breaker (default 1500 ms). */
+  sendStormWindowMs?: number;
 };
 
 /* ---------------- events in, outcomes out ---------------- */
@@ -83,8 +90,8 @@ export type AppearInput = {
 export type DisappearInput = Omit<AppearInput, "enabled">;
 
 export type Classification = "SEND" | "RECEIVE" | "RECEIVE_STALE" | "STARTUP" | "SUPPRESSED" | "IGNORED";
-export type IgnoreReason = "multi-action" | "no-page-index" | "duplicate" | "no-scope" | "disabled";
-export type SkipReason = "no-counterpart" | "disconnected" | "no-profile" | "already-there";
+export type IgnoreReason = "multi-action" | "no-page-index" | "duplicate" | "no-scope" | "disabled" | "send-storm";
+export type SkipReason = "no-counterpart" | "disconnected" | "no-profile" | "already-there" | "error";
 
 export type IssuedSwitch = { deviceId: string; profile: string; page: number; seq: number };
 export type SkippedTarget = { deviceId: string; reason: SkipReason };
@@ -119,22 +126,24 @@ type DeviceState = {
   id: string;
   /** False until the first appear after start/connect; such an appear is STARTUP. */
   armed: boolean;
-  /** Set by a disconnect; the next connect then disarms the device. */
+  /** Set by a disconnect and cleared when an appear arms the device; a connect disarms only a device still flagged. */
   disconnected: boolean;
   /** The page the device is believed to show; null when unknown (left the page, reconnect). */
   lastKnownPage: number | null;
   /** Plugin-issued switches that have not landed, in issue order. */
   pending: Pending[];
-  /** This device's most recent human SEND. */
-  lastSendSeq: number;
-  lastSendPage: number | null;
+  /** This device's most recent human navigation (SEND, or an ignored one it still chose). */
+  lastHumanSeq: number;
+  lastHumanPage: number | null;
+  /** Timestamps of recent SENDs, for the storm breaker. */
+  sendTimes: number[];
 };
 
 type Plan = IssuedSwitch & { settled: Promise<void> };
 
 export type EngineSnapshot = {
   seq: number;
-  devices: Array<Omit<DeviceState, "pending"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
+  devices: Array<Omit<DeviceState, "pending" | "sendTimes"> & { pending: Array<Omit<Pending, "issuedAt">> }>;
 };
 
 const ignored = (reason: IgnoreReason): Outcome => ({ classification: "IGNORED", reason, issued: [], skipped: [] });
@@ -149,12 +158,16 @@ export class SyncEngine {
   private readonly ttl: number;
   private readonly grace: number;
   private readonly cap: number;
+  private readonly stormMax: number;
+  private readonly stormWindow: number;
   private readonly log: Log;
 
   constructor(private readonly deps: EngineDeps, options: EngineOptions = {}) {
     this.ttl = options.pendingTtlMs ?? 3000;
     this.grace = Math.max(options.pendingGraceMs ?? 30000, this.ttl);
     this.cap = options.maxPendingPerDevice ?? 50;
+    this.stormMax = options.sendStormMax ?? 6;
+    this.stormWindow = options.sendStormWindowMs ?? 1500;
     this.log = deps.log;
   }
 
@@ -200,8 +213,9 @@ export class SyncEngine {
 
   onDeviceConnected(deviceId: string): void {
     const dev = this.device(deviceId);
-    // The app may announce devices it already showed us (e.g. at launch); only a device we
-    // saw disconnect, or never saw at all, is disarmed so its next appears count as startup.
+    // The app may announce devices it already showed us (at launch, or after a reconnect
+    // whose appears arrived first); only a device still flagged as disconnected, or never
+    // seen, is disarmed so its next appears count as startup.
     if (dev.armed && !dev.disconnected) {
       this.log.debug(`DEVICE connected dev=${deviceId} (already armed; no change)`);
       return;
@@ -225,7 +239,7 @@ export class SyncEngine {
   snapshot(): EngineSnapshot {
     return {
       seq: this.seq,
-      devices: [...this.devices.values()].map((d) => ({
+      devices: [...this.devices.values()].map(({ sendTimes: _ignored, ...d }) => ({
         ...d,
         pending: d.pending.map(({ seq, page, profile, originId, originRole, expired }) => ({ seq, page, profile, originId, originRole, expired })),
       })),
@@ -288,15 +302,13 @@ export class SyncEngine {
     //    switch issued to a device before its first appear is still recognized.
     const entry = this.consume(dev, page);
     if (entry) {
-      dev.armed = true;
-      dev.lastKnownPage = page;
+      this.arm(dev, page);
       return this.receive(dev, page, entry);
     }
 
     // 5. Startup / reconnect guard (PRD §4.4): record the page, arm, never sync.
     if (!dev.armed) {
-      dev.armed = true;
-      dev.lastKnownPage = page;
+      this.arm(dev, page);
       this.log.info(`STARTUP dev=${dev.id} page=${page} (armed; no sync)`);
       return { classification: "STARTUP", issued: [], skipped: [] };
     }
@@ -307,9 +319,10 @@ export class SyncEngine {
     // 6. Scope membership.
     const scope = findScopeForDevice(this.settings, dev.id);
     if (!scope) {
+      this.recordHuman(dev, page);
       if (!this.notedNoScope.has(dev.id)) {
         this.notedNoScope.add(dev.id);
-        this.log.info(`IGNORED dev=${dev.id} page=${page} reason=no-scope — this device has a Page Anchor but is not in any scope; assign it in the Page Anchor Property Inspector`);
+        this.log.warn(`IGNORED dev=${dev.id} page=${page} reason=no-scope — this device has a Page Anchor but is not in any scope; assign it in the Page Anchor Property Inspector`);
       } else {
         this.log.debug(`IGNORED dev=${dev.id} page=${page} reason=no-scope`);
       }
@@ -317,13 +330,15 @@ export class SyncEngine {
     }
     const member = scope.members.find((m) => m.deviceId === dev.id)!;
 
-    // 7. Disabled marker (PRD §7.3).
+    // 7. Disabled marker (PRD §7.3): the human still chose this page.
     if (!ev.enabled) {
+      this.recordHuman(dev, page);
       this.log.info(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} reason=disabled`);
       return ignored("disabled");
     }
 
     // 8. Parent precedence (PRD §6.3.3): a child may not lead while the parent's switch to it is still expected.
+    //    The suppressed navigation is discarded, so it is not recorded as the human's page.
     if (member.role === "child") {
       const parentSwitch = fresh(dev).find((p) => p.originRole === "parent");
       if (parentSwitch) {
@@ -332,25 +347,51 @@ export class SyncEngine {
       }
     }
 
-    // 9. SEND.
+    // 9. Send-storm breaker: a device cannot humanly navigate this fast; stray anchors with a wrong page
+    //    index on a page it was just switched to can, and two devices would then drive each other forever.
+    const now = this.deps.clock.now();
+    dev.sendTimes = dev.sendTimes.filter((t) => now - t <= this.stormWindow);
+    if (dev.sendTimes.length >= this.stormMax) {
+      this.log.warn(`IGNORED dev=${dev.id} page=${page} scope=${scope.id} action=${ev.actionId} reason=send-storm — ${dev.sendTimes.length} sends in ${this.stormWindow}ms; check this device's pages for a Page Anchor with the wrong page index`);
+      return ignored("send-storm");
+    }
+    dev.sendTimes.push(now);
+
+    // 10. SEND.
     return this.send(dev, scope, member, page);
+  }
+
+  private arm(dev: DeviceState, page: number): void {
+    dev.armed = true;
+    dev.disconnected = false;
+    dev.lastKnownPage = page;
+  }
+
+  private recordHuman(dev: DeviceState, page: number): void {
+    dev.lastHumanSeq = ++this.seq;
+    dev.lastHumanPage = page;
   }
 
   private async receive(dev: DeviceState, page: number, entry: Pending): Promise<Outcome> {
     const late = entry.expired;
+    const expected = fresh(dev);
+    // Stale: a still-expected switch issued before this device's own later human navigation has
+    // landed on it, and nothing issued after that navigation is heading for the device (a later
+    // switch wins). A late (expired) match never restores: it may be the human flipping to a page
+    // the engine once sent the device to, and fighting that would be worse than one missed sync.
     const stale =
-      entry.seq < dev.lastSendSeq &&
-      dev.lastSendPage !== null &&
-      dev.lastSendPage !== page &&
-      !fresh(dev).some((p) => p.page === dev.lastSendPage);
+      !late &&
+      entry.seq < dev.lastHumanSeq &&
+      dev.lastHumanPage !== null &&
+      dev.lastHumanPage !== page &&
+      !expected.some((p) => p.seq > dev.lastHumanSeq);
     if (!stale) {
       this.log.info(`RECEIVE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId}${late ? " late=true" : ""} (echo consumed; no rebroadcast)`);
       return { classification: "RECEIVE", seq: entry.seq, late, issued: [], skipped: [] };
     }
-    // The switch landed after this device's own later SEND: swallow it and restore the human's page.
-    const restorePage = dev.lastSendPage as number;
+    const restorePage = dev.lastHumanPage as number;
     const seq = ++this.seq;
-    this.log.info(`RECEIVE_STALE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId}${late ? " late=true" : ""} landed after this device's own send seq=${dev.lastSendSeq}; restoring page=${restorePage} seq=${seq}`);
+    this.log.info(`RECEIVE_STALE dev=${dev.id} page=${page} seq=${entry.seq} origin=${entry.originId} landed after this device's own navigation seq=${dev.lastHumanSeq}; restoring page=${restorePage} seq=${seq}`);
     const profile = this.profileFor(dev.id);
     if (!profile) {
       this.log.warn(`RESTORE skipped dev=${dev.id} seq=${seq} reason=no-profile — set a profile for this device in the Page Anchor Property Inspector`);
@@ -368,36 +409,42 @@ export class SyncEngine {
     const from = { deviceId: dev.id, page };
 
     for (const { member: target, page: targetPage } of resolveTargets(scope, from)) {
-      if (targetPage === undefined) {
-        skipped.push({ deviceId: target.deviceId, reason: "no-counterpart" });
-        continue;
+      try {
+        if (targetPage === undefined) {
+          skipped.push({ deviceId: target.deviceId, reason: "no-counterpart" });
+          continue;
+        }
+        const info = this.deps.devices.get(target.deviceId);
+        if (!info || !info.isConnected) {
+          skipped.push({ deviceId: target.deviceId, reason: "disconnected" });
+          continue;
+        }
+        const profile = resolveProfile(target.profile, info.type);
+        if (!profile) {
+          skipped.push({ deviceId: target.deviceId, reason: "no-profile" });
+          continue;
+        }
+        const state = this.device(target.deviceId);
+        this.expire(state);
+        // Where the device will be once the switches still expected to land have landed; an
+        // aligned target gets no switch (there would be nothing to echo).
+        const expected = fresh(state);
+        const willShow = expected.length ? expected[expected.length - 1].page : state.lastKnownPage;
+        if (willShow === targetPage) {
+          skipped.push({ deviceId: target.deviceId, reason: "already-there" });
+          continue;
+        }
+        plans.push(this.issue(state, profile, targetPage, dev.id, member.role, seq));
+      } catch (err) {
+        // One bad target must not stop the others; the SEND is still recorded.
+        skipped.push({ deviceId: target.deviceId, reason: "error" });
+        this.log.warn(`SKIP target=${target.deviceId} seq=${seq} reason=error error="${describeError(err)}"`);
       }
-      const info = this.deps.devices.get(target.deviceId);
-      if (!info || !info.isConnected) {
-        skipped.push({ deviceId: target.deviceId, reason: "disconnected" });
-        continue;
-      }
-      const profile = resolveProfile(target.profile, info.type);
-      if (!profile) {
-        skipped.push({ deviceId: target.deviceId, reason: "no-profile" });
-        continue;
-      }
-      const state = this.device(target.deviceId);
-      this.expire(state);
-      // Where the device will be once the switches still expected to land have landed; an
-      // aligned target gets no switch (there would be nothing to echo).
-      const expected = fresh(state);
-      const willShow = expected.length ? expected[expected.length - 1].page : state.lastKnownPage;
-      if (willShow === targetPage) {
-        skipped.push({ deviceId: target.deviceId, reason: "already-there" });
-        continue;
-      }
-      plans.push(this.issue(state, profile, targetPage, dev.id, member.role, seq));
     }
 
-    // Recorded once the fan-out is planned, so a failure above leaves no half-recorded send.
-    dev.lastSendSeq = seq;
-    dev.lastSendPage = page;
+    // The human's navigation is recorded once the fan-out is planned.
+    dev.lastHumanSeq = seq;
+    dev.lastHumanPage = page;
 
     const canonical = toCanonical(scope, from);
     const targets = plans.map((p) => `${p.deviceId}→${p.profile}#${p.page}`).join(", ");
@@ -412,7 +459,7 @@ export class SyncEngine {
   private logSkip(scope: Scope, seq: number, s: SkippedTarget): void {
     switch (s.reason) {
       case "disconnected":
-        this.log.warn(`SKIP target=${s.deviceId} seq=${seq} reason=disconnected — reconnect the device or remove it from scope "${scope.name}"`);
+        this.log.warn(`SKIP target=${s.deviceId} seq=${seq} reason=disconnected — the app has not reported the device as connected; reconnect it or remove it from scope "${scope.name}"`);
         break;
       case "no-profile":
         this.log.warn(`SKIP target=${s.deviceId} seq=${seq} reason=no-profile — set a profile for this device in the Page Anchor Property Inspector`);
@@ -423,6 +470,8 @@ export class SyncEngine {
       case "already-there":
         this.log.debug(`SKIP target=${s.deviceId} seq=${seq} reason=already-there`);
         break;
+      case "error":
+        break; // logged where it happened
     }
   }
 
@@ -490,7 +539,7 @@ export class SyncEngine {
   private device(id: string): DeviceState {
     let dev = this.devices.get(id);
     if (!dev) {
-      dev = { id, armed: false, disconnected: false, lastKnownPage: null, pending: [], lastSendSeq: 0, lastSendPage: null };
+      dev = { id, armed: false, disconnected: false, lastKnownPage: null, pending: [], lastHumanSeq: 0, lastHumanPage: null, sendTimes: [] };
       this.devices.set(id, dev);
     }
     return dev;

@@ -177,6 +177,19 @@ describe("validateGlobalSettings", () => {
     expect(result.fatal).toBe(false);
   });
 
+  test.each([
+    ["a member that is not an object", withScope({ members: [null, { deviceId: "C1", role: "child" }] }), /member 0 has no 'deviceId'/],
+    ["a non-string profile", withScope({ members: [{ deviceId: "P", role: "parent", profile: 5 }, { deviceId: "C1", role: "child" }] }), /non-string 'profile'/],
+    ["mapping that is not an object", withScope({ mapping: "x" }), /'mapping' must be an object/],
+    ["overrides that are not an array", withScope({ mapping: { overrides: {} } }), /'mapping.overrides' must be an array/],
+    ["an override that is not an object", withScope({ mapping: { overrides: [null] } }), /override 0 is not an object/],
+    ["an override side without a page", withScope({ mapping: { overrides: [{ a: { deviceId: "P" }, b: { deviceId: "C1", page: 1 } }] } }), /override 0\.a needs a 'deviceId' and a non-negative integer 'page'/],
+  ])("rejects a scope with %s", (_, input, reason) => {
+    const result = validateGlobalSettings(input);
+    expect(result.settings.scopes).toEqual([]);
+    expect(result.issues[0].message).toMatch(reason);
+  });
+
   test("a scope without an id is reported by index", () => {
     const result = validateGlobalSettings(withScope({ id: "" }));
     expect(result.settings.scopes).toEqual([]);

@@ -13,8 +13,13 @@ import { GLOBAL_SETTINGS_VERSION, type GlobalSettings, type Scope } from "../set
 class FakeSwitcher {
   calls: Array<{ deviceId: string; profile: string; page: number }> = [];
   private failing = new Map<string, { err: Error; once: boolean }>();
+  private deferring = new Set<string>();
+  private deferred: Array<{ reject: (err: Error) => void }> = [];
   private throwSync = false;
   failFor(deviceId: string, err: Error, once = false) { this.failing.set(deviceId, { err, once }); }
+  /** Switches to this device stay pending until rejectDeferred() is called. */
+  deferFor(deviceId: string) { this.deferring.add(deviceId); }
+  rejectDeferred(err: Error) { for (const d of this.deferred.splice(0)) d.reject(err); }
   throwSynchronously() { this.throwSync = true; }
   switchToProfile = (deviceId: string, profile: string, page: number): Promise<void> => {
     if (this.throwSync) throw new Error("switcher exploded");
@@ -24,6 +29,7 @@ class FakeSwitcher {
       if (f.once) this.failing.delete(deviceId);
       return Promise.reject(f.err);
     }
+    if (this.deferring.has(deviceId)) return new Promise<void>((_, reject) => this.deferred.push({ reject }));
     return Promise.resolve();
   };
 }
@@ -279,7 +285,7 @@ describe("edge cases", () => {
     const out = await h.nav("C1", 1);
     expect(out).toMatchObject({ classification: "SUPPRESSED", reason: "parent-in-flight" });
     expect(h.sw.calls).toHaveLength(2);
-    expect(h.state("C1").lastSendSeq).toBe(0);
+    expect(h.state("C1").lastHumanSeq).toBe(0); // a suppressed navigation is discarded, not recorded
     expect(h.log.find("info", /^SUPPRESSED dev=C1 page=1 scope=desk reason=parent-in-flight pending=\[page=4 seq=1\]/)).toHaveLength(1);
     expect(await h.cls(h.appear("C1", 4))).toBe("RECEIVE");
     expect(h.page("C1")).toBe(4);
@@ -323,7 +329,7 @@ describe("edge cases", () => {
     const h = harness();
     await h.boot();
     await h.nav("P", 2); // C1#4, C2#2 pending
-    h.engine.onSettingsChanged(h.settings); // a reload that changes nothing (the PI opened) keeps state
+    h.engine.onSettingsChanged(JSON.parse(JSON.stringify(h.settings))); // a reload that changes nothing (the PI opened) keeps state
     expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: false })]);
     expect(h.log.find("debug", /^SETTINGS unchanged/)).toHaveLength(1);
     h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" })));
@@ -366,7 +372,8 @@ describe("edge cases", () => {
     expect(await h.cls(h.appear("X", 1))).toBe("STARTUP");
     expect((await h.nav("X", 2)).reason).toBe("no-scope");
     expect((await h.nav("X", 3)).reason).toBe("no-scope");
-    expect(h.log.find("info", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(1);
+    expect(h.log.find("warn", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(1); // PRD §7.6: recoverable → warn, once
+    expect(h.log.find("debug", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(1);
     expect(h.sw.calls).toEqual([]);
     const scope = deskScope();
     scope.members.push({ deviceId: "X", role: "child" });
@@ -404,7 +411,7 @@ describe("edge cases", () => {
     const out = await h.appear("C1", 3); // the stale switch lands
     expect(out).toMatchObject({ classification: "RECEIVE_STALE", seq: 1 });
     expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C1", "profiles/mini", 4));
-    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=3 seq=1 origin=C2 landed after this device's own send seq=2; restoring page=4 seq=3$/)).toHaveLength(1);
+    expect(h.log.find("info", /^RECEIVE_STALE dev=C1 page=3 seq=1 origin=C2 landed after this device's own navigation seq=2; restoring page=4 seq=3$/)).toHaveLength(1);
     expect(await h.cls(h.appear("C1", 4))).toBe("RECEIVE");
     expect(await h.cls(h.appear("P", 3))).toBe("RECEIVE");
     expect(await h.cls(h.appear("P", 2))).toBe("RECEIVE");
@@ -449,7 +456,7 @@ describe("edge cases", () => {
     const h = harness();
     await h.boot();
     await h.nav("P", 2);
-    expect(h.state("P")).toMatchObject({ lastKnownPage: 2, pending: [], lastSendSeq: 1, lastSendPage: 2 });
+    expect(h.state("P")).toMatchObject({ lastKnownPage: 2, pending: [], lastHumanSeq: 1, lastHumanPage: 2 });
     expect(h.sw.calls.some((c) => c.deviceId === "P")).toBe(false);
   });
 
@@ -460,7 +467,7 @@ describe("edge cases", () => {
     const out = await h.nav("C1", 3);
     expect(out.skipped).toEqual([{ deviceId: "P", reason: "disconnected" }]);
     expect(h.sw.calls).toEqual([h.call("C2", "profiles/xl", 3)]);
-    expect(h.log.find("warn", /^SKIP target=P seq=1 reason=disconnected — reconnect the device or remove it from scope "Desk"$/)).toHaveLength(1);
+    expect(h.log.find("warn", /^SKIP target=P seq=1 reason=disconnected — .*remove it from scope "Desk"$/)).toHaveLength(1);
     h.devices.connect("P", true);
     h.engine.onDeviceConnected("P");
     expect(await h.cls(h.appear("P", 0))).toBe("STARTUP");
@@ -530,20 +537,131 @@ describe("review findings", () => {
     expect(h.log.find("info", /^RECEIVE dev=P page=3 seq=1 origin=C1 late=true/)).toHaveLength(1);
   });
 
-  test("F1b a switch that stalls past the TTL and lands after the parent's own flip is undone", async () => {
+  test("F1b a switch that stalls past the TTL and lands after the parent's own flip is absorbed, never rebroadcast, and not fought", async () => {
     const h = harness();
     await h.boot();
     await h.nav("C1", 1); // P#1, C2#1
     h.clock.advance(4000); // the app stalls on P
     expect(await h.cls(h.nav("P", 3))).toBe("SEND"); // C1#3, C2#3
     expect(h.sw.calls).toHaveLength(4);
-    expect(await h.appear("P", 1)).toMatchObject({ classification: "RECEIVE_STALE", late: true }); // the stalled switch lands
-    expect(h.sw.calls[4]).toEqual(h.call("P", "profiles/plus", 3));
-    expect(await h.cls(h.appear("P", 3))).toBe("RECEIVE");
+    // The stalled switch lands: a late match is indistinguishable from the human flipping back to 1,
+    // so it is a plain RECEIVE — no restore, no fan-out. The next human flip re-syncs the scope.
+    expect(await h.appear("P", 1)).toMatchObject({ classification: "RECEIVE", late: true, issued: [] });
+    expect(h.sw.calls).toHaveLength(4);
     expect(await h.cls(h.appear("C1", 3))).toBe("RECEIVE");
     expect(await h.cls(h.appear("C2", 1))).toBe("RECEIVE");
     expect(await h.cls(h.appear("C2", 3))).toBe("RECEIVE");
-    expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([3, 3, 3]);
+    expect(await h.cls(h.nav("P", 3))).toBe("SEND");
+    expect(h.sw.calls).toHaveLength(4); // everyone else is already there
+  });
+
+  test("R2-F1 a dangling expired tag plus a later human navigation never reverts the human's flip", async () => {
+    const h = harness();
+    await h.boot();
+    for (const to of [1, 3, 0]) await h.nav("P", to); // the app coalesces on C2: it stays on 0, tags [1,3,0] dangle
+    expect(h.pendingPages("C2")).toEqual([1, 3, 0]);
+    h.clock.advance(3001);
+    expect(await h.cls(h.nav("C2", 2))).toBe("SEND");
+    const calls = h.sw.calls.length;
+    const out = await h.nav("C2", 3); // the human flips to a tagged page: swallowed once, never fought
+    expect(out).toMatchObject({ classification: "RECEIVE", late: true, issued: [] });
+    expect(h.sw.calls).toHaveLength(calls);
+    expect(h.page("C2")).toBe(3);
+    expect(await h.cls(h.nav("C2", 1))).toBe("SEND"); // and the next flip syncs again
+  });
+
+  test("R2-F4 a stale landing is a plain RECEIVE when a later switch is already heading for the device", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("C2", 3); // seq 1: P#3, C1#3 (child origin)
+    expect(await h.cls(h.nav("C1", 4))).toBe("SEND"); // seq 2: P#2, C2#2 — before C1#3 lands
+    expect(await h.cls(h.nav("P", 1))).toBe("SEND"); // seq 3: C1#1, C2#1 — the parent decides
+    expect(await h.appear("C1", 3)).toMatchObject({ classification: "RECEIVE", issued: [] }); // not restored: the parent's switch is coming
+    expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE");
+    // the parent itself: C2's stale switch lands after its own navigation with nothing later coming → restored to 1
+    expect(await h.appear("P", 3)).toMatchObject({ classification: "RECEIVE_STALE", issued: [{ deviceId: "P", profile: "profiles/plus", page: 1, seq: 4 }] });
+    for (const [dev, pg] of [["P", 2], ["P", 1], ["C2", 2], ["C2", 1]] as const) expect(await h.cls(h.appear(dev, pg))).toBe("RECEIVE");
+    expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([1, 1, 1]);
+    for (const dev of ["P", "C1", "C2"]) expect(h.pendingPages(dev)).toEqual([]);
+  });
+
+  test("R2-F5 a stale landing restores the human's last page, even one with a disabled marker", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("C2", 3); // seq 1: P#3, C1#3
+    expect(await h.cls(h.nav("C1", 4))).toBe("SEND"); // seq 2
+    expect((await h.nav("C1", 0, { enabled: false })).reason).toBe("disabled"); // the human moved on to page 0
+    const out = await h.appear("C1", 3); // the lagging switch lands
+    expect(out).toMatchObject({ classification: "RECEIVE_STALE", seq: 1 });
+    expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C1", "profiles/mini", 0));
+    expect(await h.cls(h.appear("C1", 0))).toBe("RECEIVE");
+  });
+
+  test("R2-F3 a reconnect whose appears arrive before the connect event does not drop the first flip", async () => {
+    const h = harness();
+    await h.boot();
+    h.engine.onDeviceDisconnected("C1");
+    expect(await h.cls(h.appear("C1", 0))).toBe("STARTUP"); // the burst comes first
+    h.engine.onDeviceConnected("C1"); // then the connect event
+    expect(h.state("C1").armed).toBe(true);
+    expect(await h.cls(h.nav("C1", 2))).toBe("SEND");
+  });
+
+  test("R2-F2 stray anchors with wrong page indices cannot drive two decks forever: the send-storm breaker trips", async () => {
+    const scope = deskScope({ members: [{ deviceId: "P", role: "parent", profile: "profiles/plus" }, { deviceId: "C1", role: "child" }], mapping: { mode: "positional", overrides: [] } });
+    const h = harness(scope);
+    await h.boot(["P", "C1"]);
+    // Copied anchors whose page index was never updated: P page 2 also says 1, P page 3 also says 4,
+    // C1 page 1 also says 3, C1 page 4 also says 2.
+    const strays: Record<string, Record<number, number>> = { P: { 2: 1, 3: 4 }, C1: { 1: 3, 4: 2 } };
+    const current: Record<string, number> = { P: 0, C1: 0 };
+    // A simulated app: apply queued switches by emitting disappear for the old page and appear for every anchor on the new one.
+    let applied = 0;
+    const drain = async () => {
+      while (applied < h.sw.calls.length && applied < 200) {
+        const { deviceId, page } = h.sw.calls[applied++];
+        h.leave(deviceId, current[deviceId]);
+        current[deviceId] = page;
+        await h.appear(deviceId, page, { actionId: `${deviceId}-p${page}` });
+        const stray = strays[deviceId][page];
+        if (stray !== undefined) await h.appear(deviceId, stray, { actionId: `${deviceId}-stray-on-${page}` });
+        h.clock.advance(50);
+      }
+    };
+    h.leave("P", 0);
+    current.P = 1;
+    await h.appear("P", 1); // one human flip
+    await drain();
+    expect(h.sw.calls.length).toBeLessThan(20);
+    expect(h.log.find("warn", /reason=send-storm/).length).toBeGreaterThan(0);
+    expect(h.log.find("warn", /reason=send-storm/)[0].msg).toMatch(/check this device's pages for a Page Anchor with the wrong page index/);
+  });
+
+  test("R2-F7 a failing target does not stop the fan-out and the send is still recorded", async () => {
+    const h = harness();
+    await h.boot();
+    let calls = 0;
+    const real = h.devices.get;
+    h.devices.get = (id: string) => { if (id === "C1" && calls++ === 0) throw new Error("directory hiccup"); return real(id); };
+    const out = await h.nav("P", 1);
+    expect(out.classification).toBe("SEND");
+    expect(out.skipped).toEqual([{ deviceId: "C1", reason: "error" }]);
+    expect(h.sw.calls).toEqual([h.call("C2", "profiles/xl", 1)]);
+    expect(h.log.find("warn", /^SKIP target=C1 seq=1 reason=error error="directory hiccup"/)).toHaveLength(1);
+    expect(h.state("P")).toMatchObject({ lastHumanSeq: 1, lastHumanPage: 1 });
+  });
+
+  test("R2-F21 a switch rejected after its echo was consumed leaves pending untouched", async () => {
+    const h = harness();
+    await h.boot();
+    h.sw.deferFor("C1");
+    const send = h.nav("P", 1);
+    expect(h.pendingPages("C1")).toEqual([1]);
+    expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE");
+    h.sw.rejectDeferred(new Error("late rejection"));
+    await send;
+    expect(h.log.find("warn", /^SWITCH failed dev=C1 .*late rejection/)).toHaveLength(1);
+    expect(h.pendingPages("C1")).toEqual([]);
   });
 
   test("F2 a parent switch that never lands stops suppressing the child after the TTL, with a warning naming the profile", async () => {
@@ -647,14 +765,14 @@ describe("review findings", () => {
     expect(h.log.find("debug", /reason=duplicate \(consumed seq=/)).toHaveLength(1);
   });
 
-  test("F26 a failure inside the handler is logged, returns IGNORED, and leaves no half-recorded send", async () => {
+  test("F26 a directory that fails for every target yields a SEND with every target skipped, nothing thrown", async () => {
     const h = harness();
     await h.boot();
     h.devices.throwOnGet = true;
     const out = await h.nav("P", 1);
-    expect(out.classification).toBe("IGNORED");
-    expect(h.log.find("error", /^UNEXPECTED handler=onAppear dev=P page=1 error="directory offline"/)).toHaveLength(1);
-    expect(h.state("P").lastSendSeq).toBe(0);
+    expect(out.classification).toBe("SEND");
+    expect(out.skipped.map((s) => s.reason)).toEqual(["error", "error"]);
+    expect(h.log.find("error", /UNEXPECTED/)).toHaveLength(0);
     expect(h.sw.calls).toEqual([]);
   });
 });

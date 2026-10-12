@@ -53,7 +53,7 @@
   <div class="ds-block" id="setup"></div>
   <div class="ds-block ds-row">
     <button id="addScope">Add scope</button>
-    <button id="save">Save</button>
+    <button id="save" disabled>Save</button>
     <button id="discard">Discard changes</button>
   </div>
   <div class="ds-block ds-status" id="status" role="status" aria-live="polite"></div>
@@ -76,6 +76,10 @@
       let statusWasSaving = false;            // a Save is awaiting the plugin's reply
       let actionUuid = null;                  // this action's UUID, from actionInfo
       let saveTimer = null;                   // "no reply" watchdog for Save
+      let loaded = false;                     // the first globalSettings reply has arrived
+      let loadAttempts = 0;                   // initial-load retries
+      let loadTimer = null;                   // "no reply" watchdog for the initial load
+      const collapsed = new Set();            // scope ids the user collapsed
 
       /* ---------------- Stream Deck plumbing ---------------- */
 
@@ -93,8 +97,7 @@
         ws.addEventListener("open", () => {
           send({ event: registerEvent, uuid });
           send({ event: "getSettings", context: uuid });
-          toPlugin({ event: "getDevices" });
-          toPlugin({ event: "getGlobalSettings" });
+          requestInitialState();
         });
         const onDisconnected = () => {
           clearSaveTimeout();
@@ -130,6 +133,25 @@
         if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
       }
 
+      // The first replies can be dropped if the plugin has not yet seen this panel appear;
+      // ask again a few times before giving up. Save stays disabled until settings arrive.
+      function requestInitialState() {
+        if (loaded) return;
+        loadAttempts++;
+        toPlugin({ event: "getDevices" });
+        toPlugin({ event: "getGlobalSettings" });
+        if (loadTimer) clearTimeout(loadTimer);
+        loadTimer = setTimeout(() => {
+          if (loaded) return;
+          if (loadAttempts < 3) {
+            setStatus("Waiting for the plugin…", "");
+            requestInitialState();
+          } else {
+            setStatus("No reply from the plugin — is it running? Close and reopen this panel.", "err");
+          }
+        }, 3000);
+      }
+
       function onPluginMessage(payload) {
         switch (payload.event) {
           case "devices": {
@@ -142,6 +164,12 @@
           }
           case "globalSettings":
             clearSaveTimeout();
+            if (!loaded) {
+              loaded = true;
+              if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+              $("save").disabled = false;
+              if ($("status").textContent.startsWith("Waiting")) setStatus("", "");
+            }
             saved = payload.settings || { version: 2, scopes: [] };
             if (statusWasSaving || !dirty) {
               draft = clone(saved);
@@ -158,7 +186,7 @@
           case "globalSettingsRejected":
             clearSaveTimeout();
             statusWasSaving = false; // the draft stays dirty so the user can fix it
-            setStatus("Not saved:\n" + issuesText(payload.issues || []), "err");
+            setStatus("Not saved — fix these and try again:\n" + issuesText(payload.issues || []), "err");
             break;
         }
       }
@@ -177,7 +205,9 @@
         const input = $("pageIndex");
         const raw = input.value.trim();
         const n = Number(raw);
-        const valid = raw === "" || (Number.isInteger(n) && n >= 0);
+        // A number box reports '' for text it cannot parse ("7e", "-", "1."): badInput, not blank.
+        const bad = !!(input.validity && input.validity.badInput);
+        const valid = !bad && (raw === "" || (Number.isInteger(n) && n >= 0));
         input.setAttribute("aria-invalid", valid ? "false" : "true");
         if (!valid) {
           setStatus("Page index must be a whole number, 0 or more. Not saved.", "err");
@@ -296,9 +326,33 @@
         return el("option", { value, selected: !!selected }, label);
       }
 
+      /** Marks a number box invalid (with a message) or valid; returns the parsed value or undefined. */
+      function readNumber(input, min, message) {
+        const raw = input.value.trim();
+        const n = Number(raw);
+        const bad = !!(input.validity && input.validity.badInput);
+        const ok = !bad && raw !== "" && Number.isInteger(n) && n >= min;
+        input.setAttribute("aria-invalid", ok || (raw === "" && !bad) ? "false" : "true");
+        if (!ok && !(raw === "" && !bad)) setStatus(message, "err");
+        return ok ? n : undefined;
+      }
+
       function renderSetup() {
         const root = $("setup");
+        // Re-rendering replaces every control; put the keyboard focus back where it was.
+        const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.focus : null;
         root.replaceChildren();
+        try {
+          renderSetupInto(root);
+        } finally {
+          if (focused) {
+            const again = root.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+            if (again) again.focus();
+          }
+        }
+      }
+
+      function renderSetupInto(root) {
         const ids = allDeviceIds();
         if (!ids.length) {
           root.append(el("div", { class: "ds-muted" }, "No Stream Deck devices known yet."));
@@ -313,7 +367,7 @@
         for (const id of ids) {
           const scope = scopeOf(id);
           const member = memberOf(id);
-          const scopeSelect = el("select", { "aria-label": `Scope for ${deviceName(id)}`, onchange: change((ev) => {
+          const scopeSelect = el("select", { "aria-label": `Scope for ${deviceName(id)}`, "data-focus": `scope:${id}`, onchange: change((ev) => {
             const v = ev.target.value;
             if (v === "") removeFromScope(id);
             else if (v === "__new") assignToScope(id, addScope());
@@ -322,23 +376,23 @@
             option("", "— not synced —", !scope),
             ...draft.scopes.map((s) => option(s.id, s.name || s.id, scope && scope.id === s.id)),
             option("__new", "New scope…", false));
-          const roleSelect = el("select", { "aria-label": `Role of ${deviceName(id)}`, disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
+          const roleSelect = el("select", { "aria-label": `Role of ${deviceName(id)}`, "data-focus": `role:${id}`, disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
             option("parent", "Parent", member && member.role === "parent"),
             option("child", "Child", member && member.role === "child"));
           const profileInput = el("input", {
-            type: "text", disabled: !member, "aria-label": `Profile for ${deviceName(id)}`,
+            type: "text", disabled: !member, "aria-label": `Profile for ${deviceName(id)}`, "data-focus": `profile:${id}`,
             placeholder: defaultProfile(id) || (member ? "required for this device type" : ""),
             value: member && member.profile ? member.profile : "",
             oninput: (ev) => { if (member) { member.profile = ev.target.value.trim() || undefined; markDirty(); } },
           });
           const pagesInput = el("input", {
-            class: "ds-page", type: "number", min: "1", step: "1", disabled: !member, placeholder: "5", "aria-label": `Page count of ${deviceName(id)}`,
+            class: "ds-page", type: "number", min: "1", step: "1", disabled: !member, placeholder: "5", "aria-label": `Page count of ${deviceName(id)}`, "data-focus": `pages:${id}`,
             value: member && member.pageCount ? String(member.pageCount) : "",
             oninput: (ev) => {
               if (!member) return;
-              const n = Number(ev.target.value);
-              if (ev.target.value.trim() === "") delete member.pageCount;
-              else if (Number.isInteger(n) && n >= 1) member.pageCount = n;
+              const n = readNumber(ev.target, 1, "Pages must be a whole number, 1 or more.");
+              if (n !== undefined) member.pageCount = n;
+              else if (ev.target.value.trim() === "" && !(ev.target.validity && ev.target.validity.badInput)) delete member.pageCount;
               markDirty();
             },
           });
@@ -359,17 +413,20 @@
           (parent ? `parent ${deviceName(parent.deviceId)}` : "no parent") +
           `, ${children.length} child${children.length === 1 ? "" : "ren"}` +
           (scope.mapping.overrides.length ? `, ${scope.mapping.overrides.length} override(s)` : "");
-        const box = el("details", { class: "ds-scope", open: true }, el("summary", {}, summaryText));
+        const box = el("details", {
+          class: "ds-scope", open: !collapsed.has(scope.id),
+          ontoggle: (ev) => { if (ev.target.open) collapsed.delete(scope.id); else collapsed.add(scope.id); },
+        }, el("summary", {}, summaryText));
 
         box.append(el("div", { class: "ds-row" },
           el("span", { class: "ds-fixed ds-muted" }, "Name"),
-          el("input", { type: "text", value: scope.name, "aria-label": "Scope name", oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
-          el("button", { class: "ds-fixed", onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); }) }, "Remove scope")));
+          el("input", { type: "text", value: scope.name, "aria-label": "Scope name", "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); } }),
+          el("button", { class: "ds-fixed", "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); }) }, "Remove scope")));
 
         if (parent && children.length) {
           box.append(el("div", { class: "ds-muted" }, "Overrides pin a parent page to a child page (both directions); other pages map positionally."));
           scope.mapping.overrides.forEach((o, i) => box.append(renderOverride(scope, parent, children, o, i)));
-          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", onclick: change(() => {
+          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", "data-focus": `addov:${scope.id}`, onclick: change(() => {
             scope.mapping.overrides.push({ a: { deviceId: parent.deviceId, page: 0 }, b: { deviceId: children[0].deviceId, page: 0 } });
           }) }, "Add override")));
         } else {
@@ -379,26 +436,35 @@
       }
 
       function renderOverride(scope, parent, children, o, index) {
-        const pageInput = (ref, label) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": label,
+        const key = (part) => `ov:${scope.id}:${index}:${part}`;
+        const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": label, "data-focus": key(part),
           oninput: (ev) => {
-            const raw = ev.target.value.trim();
-            if (raw === "") return; // mid-edit: keep the previous value until a number is typed
-            const n = Number(raw);
-            if (Number.isInteger(n) && n >= 0) { ref.page = n; markDirty(); }
+            // Mid-edit blanks keep the previous value; anything else invalid is flagged until fixed.
+            const n = readNumber(ev.target, 0, `${label} must be a whole number, 0 or more.`);
+            if (n !== undefined) { ref.page = n; markDirty(); }
           } });
         return el("div", { class: "ds-row" },
-          el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a, "Parent page"),
+          el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a, "Parent page", "a"),
           el("span", { class: "ds-fixed" }, "↔"),
-          el("select", { "aria-label": "Child device", onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
+          el("select", { "aria-label": "Child device", "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
             ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
-          el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page"),
-          el("button", { class: "ds-fixed", "aria-label": "Remove override", onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
+          el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page", "b"),
+          el("button", { class: "ds-fixed", "aria-label": "Remove override", "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(index, 1); }) }, "×"));
       }
 
       /* ---------------- save / discard ---------------- */
 
       $("addScope").addEventListener("click", change(() => { addScope(); }));
       $("save").addEventListener("click", () => {
+        if ($("setup").querySelector('[aria-invalid="true"]')) {
+          setStatus("Fix the highlighted fields first.", "err");
+          return;
+        }
+        // A scope nobody belongs to (Add scope, or every member removed) has nothing to save.
+        if (draft.scopes.some((s) => s.members.length === 0)) {
+          draft.scopes = draft.scopes.filter((s) => s.members.length > 0);
+          renderSetup();
+        }
         for (const s of draft.scopes) syncParentId(s);
         if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } })) {
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");

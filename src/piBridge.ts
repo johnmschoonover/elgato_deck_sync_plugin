@@ -36,6 +36,29 @@ export async function loadGlobalSettings(log: Log): Promise<ValidatedSettings> {
   return result;
 }
 
+export type SettingsConsumer = { onSettingsChanged(settings: GlobalSettings): void };
+
+/**
+ * Handles the SDK's global-settings event. Before the engine has started, the start-up
+ * load applies the settings (the event also fires for the plugin's own read); afterwards
+ * an unusable payload is ignored rather than replacing a working configuration.
+ */
+export function createGlobalSettingsHandler(log: Log, engine: SettingsConsumer, isStarted: () => boolean): (raw: unknown) => void {
+  return (raw) => {
+    if (!isStarted()) {
+      log.debug("Settings: global-settings event before start; the start-up load applies them");
+      return;
+    }
+    const { settings, issues, fatal } = validateGlobalSettings(raw);
+    logIssues(log, issues);
+    if (fatal) {
+      log.warn("Settings: ignoring an unusable global-settings payload; keeping the current configuration.");
+      return;
+    }
+    engine.onSettingsChanged(settings);
+  };
+}
+
 export type PiBridgeOptions = {
   log: Log;
   /** Called with validated settings after a successful save from the PI. */
@@ -50,7 +73,14 @@ export function registerPropertyInspectorBridge({ log, onSettingsSaved }: PiBrid
       log.warn(`PI: could not send '${msg.event}' (${describeError(err)}) — reopen the Page Anchor's Property Inspector`);
     }
   };
-  const pushDevices = () => void send({ event: "devices", devices: listDevices() });
+  const pushDevices = () => {
+    // The SDK drops the message silently when no Property Inspector is open.
+    if (!streamDeck.ui.action) {
+      log.debug("PI: no Property Inspector open; device list not pushed");
+      return;
+    }
+    void send({ event: "devices", devices: listDevices() });
+  };
   streamDeck.devices.onDeviceDidConnect(pushDevices);
   streamDeck.devices.onDeviceDidDisconnect(pushDevices);
 

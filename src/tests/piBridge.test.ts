@@ -23,6 +23,7 @@ jest.mock("@elgato/streamdeck", () => ({
       setGlobalSettings: jest.fn(async (s: unknown) => { if (mockState.setFails) throw new Error("disk full"); mockState.stored = s; }),
     },
     ui: {
+      get action() { return (mockState as unknown as { piClosed?: boolean }).piClosed ? undefined : {}; },
       onSendToPlugin: (l: (ev: unknown) => Promise<void>) => { mockState.listeners.sendToPlugin = l; },
       sendToPropertyInspector: jest.fn(async (p: unknown) => {
         if ((mockState as unknown as { failSend?: boolean }).failSend) throw new Error("no property inspector");
@@ -32,7 +33,7 @@ jest.mock("@elgato/streamdeck", () => ({
   },
 }));
 
-import { listDevices, loadGlobalSettings, registerPropertyInspectorBridge } from "../piBridge";
+import { createGlobalSettingsHandler, listDevices, loadGlobalSettings, registerPropertyInspectorBridge } from "../piBridge";
 import { GLOBAL_SETTINGS_VERSION, createDefaultGlobalSettings } from "../settings";
 
 const log = { debug: jest.fn(), info: jest.fn(), warn: jest.fn(), error: jest.fn() };
@@ -87,6 +88,30 @@ describe("loadGlobalSettings", () => {
   });
 });
 
+describe("createGlobalSettingsHandler", () => {
+  const engine = { onSettingsChanged: jest.fn() };
+
+  test("before start the event is ignored (the start-up load applies the settings)", () => {
+    const handle = createGlobalSettingsHandler(log, engine, () => false);
+    handle(validSettings);
+    expect(engine.onSettingsChanged).not.toHaveBeenCalled();
+  });
+
+  test("after start valid settings reach the engine, with issues logged", () => {
+    const handle = createGlobalSettingsHandler(log, engine, () => true);
+    handle({ version: 2, scopes: [{ id: "bad", members: [] }, ...validSettings.scopes] });
+    expect(engine.onSettingsChanged).toHaveBeenCalledWith(validSettings);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("Scope 'bad' ignored"));
+  });
+
+  test("after start an unusable payload is ignored and the configuration kept", () => {
+    const handle = createGlobalSettingsHandler(log, engine, () => true);
+    handle({ version: 1 });
+    expect(engine.onSettingsChanged).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("ignoring an unusable global-settings payload"));
+  });
+});
+
 describe("Property Inspector messages", () => {
   test("getDevices replies with the device list", async () => {
     await message({ event: "getDevices" });
@@ -135,6 +160,15 @@ describe("Property Inspector messages", () => {
     mockState.listeners.disconnect!();
     await Promise.resolve();
     expect(mockState.sent).toEqual([{ event: "devices", devices: DEVICE_LIST }, { event: "devices", devices: DEVICE_LIST }]);
+  });
+
+  test("device pushes are skipped while no Property Inspector is open", async () => {
+    (mockState as unknown as { piClosed: boolean }).piClosed = true;
+    mockState.listeners.connect!();
+    await Promise.resolve();
+    expect(mockState.sent).toEqual([]);
+    expect(log.debug).toHaveBeenCalledWith(expect.stringContaining("no Property Inspector open"));
+    (mockState as unknown as { piClosed: boolean }).piClosed = false;
   });
 
   test("a reply that cannot be delivered is logged at warn, not thrown", async () => {

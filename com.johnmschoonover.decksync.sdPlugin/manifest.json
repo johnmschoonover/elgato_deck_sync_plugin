@@ -14,8 +14,14 @@
     "MinimumVersion": "7.1"
   },
   "OS": [
-    { "Platform": "mac", "MinimumVersion": "13.0" },
-    { "Platform": "windows", "MinimumVersion": "10" }
+    {
+      "Platform": "mac",
+      "MinimumVersion": "13.0"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
   ],
   "Nodejs": {
     "Version": "24",
@@ -27,14 +33,17 @@
       "UUID": "com.johnmschoonover.decksync.anchor",
       "Icon": "imgs/actions/anchor/icon",
       "Tooltip": "Place on a page to sync other devices when this page becomes active.",
-      "Controllers": ["Keypad"],
+      "Controllers": [
+        "Keypad"
+      ],
       "PropertyInspectorPath": "ui/anchor.html",
       "States": [
         {
           "Image": "imgs/actions/anchor/key",
           "TitleAlignment": "middle"
         }
-      ]
+      ],
+      "SupportedInMultiActions": false
     }
   ]
 }

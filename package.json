@@ -26,5 +26,9 @@
   },
   "dependencies": {
     "@elgato/streamdeck": "^2.0.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
   }
 }

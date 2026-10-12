@@ -24,7 +24,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 ├── docs/
 │   ├── SYNC_ENGINE.md                       # engine design: classification order, precedence, GC, hardware risks
 │   ├── PROFILES.md                          # bundled-profile authoring contract + manual procedure (D1)
-│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-10, D3)
+│   ├── MANUAL_TESTS.md                      # hardware gate matrix (A3, B, C-1…C-12, D3)
 │   └── SPIKE1.md                            # subpage-targeting spike: procedure + result slot
 ├── scripts/make-placeholder-icons.mjs       # regenerates imgs/ at spec sizes (npm run icons)
 ├── src/

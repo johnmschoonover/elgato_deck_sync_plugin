@@ -14,7 +14,7 @@ folder). Plugin log: `com.johnmschoonover.decksync.sdPlugin/logs/`.
 |---|---|
 | Install / link the plugin, restart Stream Deck. | "Deck Sync" category appears in the actions list with the Page Anchor action and its icon. |
 | Open Preferences → Plugins. | Deck Sync is listed; no warning badge. |
-| Open the log file. | No error lines. The `sync` scope shows `SETTINGS applied (start) …` and `START devices=[…] scopes=…`. |
+| Open the log file (`logs/com.johnmschoonover.decksync.0.log`). | No error lines. The `sync` scope shows `START devices=[…] scopes=0`. (`SETTINGS applied (start)` appears only once a scope has been saved; on a fresh install the defaults are "unchanged", logged at debug.) |
 | `npm run validate` on the same build. | "Validation successful". |
 
 ## Gate B — configuration persists (PRD §7.2)
@@ -37,7 +37,7 @@ positional mapping.
 | # | Step | Expect |
 |---|---|---|
 | C-1 | Launch Stream Deck with both devices connected. Touch nothing for 10 s. | **Nothing moves.** Log shows the startup appears classified as startup/ignored, no `SEND`. |
-| C-2 | On P press the page-right key: page 0 → 1. | C goes to page 1. Log: one `SEND` line for P page 1 naming C as target, then a `RECEIVE` (echo) line for C page 1. No further lines. |
+| C-2 | On P press the page-right key: page 0 → 1. | C goes to page 1. Log: one `SEND` line for P page 1 naming C as target, then a `RECEIVE` (echo) line for C page 1. No further `SEND`/`RECEIVE` lines (debug `LEAVE` / `SWITCH sent` lines are expected in the dev build). |
 | C-3 | On C press page-right: 1 → 2. | P goes to page 2 (peer follow). Log: `SEND` from C, `RECEIVE` on P. |
 | C-4 | On P press left/right rapidly 10 times, ending on page 3. | C ends on page 3; the two devices do not oscillate afterwards. Log shows one `SEND` per press and one `RECEIVE` per landed switch, no `SEND` caused by a `RECEIVE`. |
 | C-5 | Disable the page-2 anchor on P (PI → *Enabled* off). Flip P to page 2. | C does **not** move. Log: appear on P page 2 classified as disabled/ignored. Re-enable afterwards. |

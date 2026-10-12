@@ -38,8 +38,8 @@ the Stream Deck app; no scripts or daemons.
   from the Stream Deck app and added per [`docs/PROFILES.md`](docs/PROFILES.md) before sync
   can run. Defaults are wired for the Original/MK.2, Mini, XL and Neo; any other device type
   (including the Stream Deck +) needs a profile name set in the configuration UI.
-- Internet access the first time the Property Inspector opens: it loads Elgato's
-  `sdpi.css` stylesheet from `cdn.elgato.com`. Offline it still works, unstyled.
+- Internet access when the Property Inspector opens: it loads Elgato's `sdpi.css`
+  stylesheet from `cdn.elgato.com` each time. Offline it still works, unstyled.
 
 ## Install (development build)
 
@@ -60,8 +60,8 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
 1. **Profiles.** Each device must be on a profile bundled with Deck Sync (the app cannot be
    asked to switch to user-made profiles). Authoring and bundling them is a manual step
    described in [`docs/PROFILES.md`](docs/PROFILES.md): 5 pages, one Page Anchor per page
-   with its page index set. Until profiles are bundled, switches fail with a
-   `SWITCH failed … profile` warning in the log.
+   with its page index set. Until profiles are bundled, the app ignores or rejects each
+   switch request: `SWITCH unconfirmed … profile` (after 3 s) or `SWITCH failed …` in the log.
 2. **Anchors.** Every page that should sync needs one Page Anchor whose *Page index* is the
    page's 0-based position. Bundled profiles come with them pre-placed; on your own pages
    drag **Deck Sync → Page Anchor** onto any key and set the index in its Property
@@ -78,10 +78,11 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
 
 ## Reading the log
 
-Logs are written to `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored). Engine
-lines carry the `sync` scope; settings and Property Inspector lines the `DeckSync` scope.
-Lines marked *(debug)* appear only while the manifest has `Nodejs.Debug` enabled (the
-development build does); a release build logs info and above.
+Logs are written to `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored) as
+`com.johnmschoonover.decksync.<n>.log`; the SDK rotates them, and the lowest number is the
+current file. Engine lines carry the `sync` scope; settings and Property Inspector lines
+the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
+`Nodejs.Debug` enabled (the development build does); a release build logs info and above.
 
 | Line | Meaning |
 |---|---|
@@ -92,14 +93,18 @@ development build does); a release build logs info and above.
 | `RECEIVE_STALE dev=P … restoring page=1 seq=9` | a switch landed after the device's own later navigation; undone |
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
-| `IGNORED … reason=disabled` / `no-scope` / `no-page-index` (warn, once) | why nothing was sent |
+| `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
+| `IGNORED … reason=no-scope` (warn once per device, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
+| `IGNORED … reason=send-storm` (warn) | the breaker tripped: look for a copied anchor with the wrong page index on that device |
 | `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
-| `SKIP target=C2 … reason=disconnected` / `no-profile` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
+| `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
 | `SWITCH unconfirmed dev=C1 profile=… — no appear within 3000ms …` (warn) | a switch never landed: missing anchor, unbundled profile, or already there |
+| `RESTORE skipped … reason=no-profile` (warn) | a stale switch could not be undone because the device has no profile |
 | `DEVICE connected` / `DEVICE disconnected … droppedPending=n` | device events |
 | `LEAVE dev=P page=2`, `GC …` *(debug)* | a page was left / an old tag was dropped |
-| `Settings: …` (warn, `DeckSync` scope) | a scope was rejected and why; `PI: …` lines concern the Property Inspector |
+| `UNEXPECTED handler=onAppear …` (error) | a bug: the handler threw (caught) — please report it |
+| `Settings saved: n scope(s).` (info), `Settings: …` (warn), `PI: …`, `Startup failed: …` (error) — `DeckSync` scope | configuration saved / a scope rejected and why / Property Inspector delivery / the plugin could not start |
 
 ## Troubleshooting
 
@@ -107,8 +112,9 @@ development build does); a release build logs info and above.
   Saved. Check the log for `IGNORED … no-scope` or `no-page-index`.
 - **`SWITCH failed … profile`** — the target profile is not bundled/registered in
   `manifest.json → Profiles`, or the device type has no default; set *Profile*.
-- **One device never follows** — its *Pages* count may be lower than the page being sent
-  (`SKIP … no-counterpart`), or it is disconnected (`SKIP … disconnected`).
+- **One device never follows** — `SKIP … no-counterpart` means the page has no mapping:
+  the sending device's or the target's *Pages* count is below that page, or an override pins
+  it elsewhere; `SKIP … disconnected` means the app has not reported the device as connected.
 - **A page flip did nothing once right after a switch** — expected only when the page you
   flipped to is one the plugin had just tried to switch that device to and the switch never
   confirmed (`SWITCH unconfirmed` in the log); see [`docs/SYNC_ENGINE.md`](docs/SYNC_ENGINE.md).
@@ -121,6 +127,9 @@ development build does); a release build logs info and above.
 - Bundled profiles only. None are bundled yet (D1 pending), and the Stream Deck + has no
   default profile name (set *Profile* manually).
 - Button state is not synced, only the page.
+- Page Anchors inside Multi Actions are ignored (the action is not offered there).
+- Copied anchors whose page index was not updated make a page report two indices; a
+  send-storm breaker stops the resulting ping-pong, but the fix is the anchor's index.
 
 ## Development
 

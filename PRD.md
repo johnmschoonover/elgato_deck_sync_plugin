@@ -74,7 +74,7 @@ The SDK has no event for "the active page changed." The plugin can only learn a 
 
 ### 4.4 `onWillAppear` also fires on startup/reconnect
 
-`onWillAppear` fires not only on deliberate navigation but on plugin start and device (re)connect (the docs note it fires "during startup if the action is on the front page"). Without a guard this would force unwanted switches on launch — see §7.3 and §8.4.
+`onWillAppear` fires not only on deliberate navigation but on plugin start and device (re)connect (the docs note it fires "during startup if the action is on the front page"). Without a guard this would force unwanted switches on launch — see §7.3, §8.6 ("No settle window") and `docs/SYNC_ENGINE.md`.
 
 ### 4.5 SDK / toolchain versions
 
@@ -122,7 +122,7 @@ This is the heart of v1 behavior and **MUST** be implemented exactly:
 1. **A page change is either a SEND or a RECEIVE, never both, decided by its cause.**
    - **Human-initiated navigation** (the user physically flips/turns/presses on a deck) is a **SEND**: the device broadcasts to the rest of its scope.
    - **A switch the plugin itself issued** (`switchToProfile`) produces a **RECEIVE-only** arrival on the target device. A received arrival is **terminal** — it never rebroadcasts. This is what prevents feedback loops, structurally.
-2. **Echo discrimination is causal, not time-based.** The plugin tags every switch it initiates (an in-flight set keyed by device + target page) and swallows the matching `onWillAppear` echo. Any appear event that does *not* match a pending plugin-issued switch is treated as human-initiated → a SEND. **Do not implement this as a blind debounce** that could drop a legitimate human navigation.
+2. **Echo discrimination is causal, not time-based.** The plugin tags every switch it initiates (an in-flight set keyed by device + target page — implemented as an ordered per-device queue with supersede and expiry semantics, §8.6 and `docs/SYNC_ENGINE.md`) and swallows the matching `onWillAppear` echo. Any appear event that does *not* match a pending plugin-issued switch is treated as human-initiated → a SEND. **Do not implement this as a blind debounce** that could drop a legitimate human navigation.
 3. **Parent precedence.** A parent's human-initiated SEND is authoritative: it is never suppressed and overrides anything in flight. Children may also SEND (peer follow is allowed), but in any conflict the parent wins. (A child-initiated change is a convenience; a parent-initiated change is a guarantee that all children follow.)
 4. **Subpages.** Detecting the user entering a subpage is supported (§4.2) and counts as a human navigation; *driving* others into a subpage is deferred pending Spike-1.
 
@@ -229,7 +229,7 @@ Invalid scopes are dropped individually with a warning; the rest are kept (§8.6
 
 ### 7.6 Logging
 
-- Sync events at **info**: initiating device, scope, resolved target(s), page, send/receive classification, success/failure.
+- Sync events at **info**: initiating device, scope, resolved target(s), page, send/receive classification, success/failure. Success is the target's RECEIVE line (the SDK only confirms that a switch request was written, which is logged at debug); failure to switch is warn.
 - Recoverable errors (profile not found, device disconnected, no scope) at **warn** with actionable messages; no unhandled exceptions on bad config.
 
 **AC [agent]:** unit/log-capture tests assert a SEND emits an info line with the classification and that bad config produces a warn, not a throw. **AC [gate]:** logs during real sync read clearly enough to debug a misconfiguration.
@@ -264,7 +264,7 @@ Removed. Anchors store `pageIndex` + `enabled`; legacy fields are ignored.
 
 ### 8.5 OPEN — bundled profiles (D1, **[gate]**)
 
-No bundled profiles exist. The four hand-written JSON files previously in `profiles/` could never install (exported profiles are zip archives) and were removed with their manifest entries so the plugin validates and loads cleanly. Until John exports real profiles per `docs/PROFILES.md`, every switch fails with a `SWITCH failed … profile` warning — sync cannot be exercised on hardware before D1. The engine's default profile names (`profiles/original|mini|xl|neo`) match the names that document specifies.
+No bundled profiles exist. The four hand-written JSON files previously in `profiles/` could never install (exported profiles are zip archives) and were removed with their manifest entries so the plugin validates and loads cleanly. Until John exports real profiles per `docs/PROFILES.md`, the app either ignores each switch request (`SWITCH unconfirmed … profile` warning after 3 s) or rejects it (`SWITCH failed`) — sync cannot be exercised on hardware before D1. The engine's default profile names (`profiles/original|mini|xl|neo`) match the names that document specifies.
 
 ### 8.6 Implementation decisions to ratify at the next gate
 
@@ -274,7 +274,9 @@ No bundled profiles exist. The four hand-written JSON files previously in `profi
 - **Stale-switch handling.** A switch that lands after a device's own later send is swallowed and the page restored; a send from a device with switches still heading for it re-asserts its page. This is how "a parent's SEND overrides anything in flight" is realised (`docs/SYNC_ENGINE.md`).
 - No Stream Deck + profile is in the §7.4 list although §6.6's example uses an SD+ as parent; with an SD+ in a scope its `profile` must be set explicitly until one is bundled.
 - **Parent precedence is per device, not scope-wide.** A child is suppressed only while a parent-issued switch *to that child* is still expected; once it has landed the child may lead again even if a sibling's switch is still in flight. The alternative — treating the parent's send as in flight until every child acknowledges — stalls every child behind one that never acknowledges. One of the two independent designs preferred scope-wide; ratify.
-- **Unconfirmed switches stay echo tags.** After 3 s an unconfirmed switch stops suppressing children and stops counting as the device's position, but it remains an echo tag for 30 s so a late landing (app stall, sleep/wake) can never be mistaken for human navigation and rebroadcast. The bounded cost: a human navigation to exactly that page within the window is swallowed once (`docs/SYNC_ENGINE.md`); hardware checks C-11/C-12 in `docs/MANUAL_TESTS.md`.
+- **Unconfirmed switches stay echo tags.** After 3 s an unconfirmed switch stops suppressing children, stops counting as the device's position and can no longer trigger a restore, but it remains an echo tag for 30 s so a late landing (app stall, sleep/wake) can never be mistaken for human navigation and rebroadcast. The bounded cost: a human navigation to exactly that page within the window is swallowed once — never reverted after the TTL (`docs/SYNC_ENGINE.md`); hardware checks C-11/C-12 in `docs/MANUAL_TESTS.md`.
+- **Stale switches are undone only when nothing later is coming.** A still-expected switch that lands after the device's own later navigation is swallowed and the human's last page restored, unless a switch issued after that navigation (e.g. the parent's) is already heading for the device — then the later switch wins.
+- **Send-storm breaker.** More than 6 SENDs from one device within 1.5 s are ignored with a warning. It is a circuit breaker for pages carrying copied anchors with the wrong page index (which can make two decks drive each other forever), not a classifier.
 
 ### 8.7 Not yet verified on hardware
 
@@ -288,7 +290,7 @@ Dependency-ordered. Each epic is a candidate review gate.
 
 **Epic B — Roles, scopes & data model.** B1 Define global-settings schema (§6.5) + (de)serialization. B2 Scope/role validation + mapping resolution (positional + override) with unit tests. B3 Replace per-anchor target fields with `pageIndex`; fix PI hydration (§8.3). B4 Config UI for roles/scopes/mapping.
 
-**Epic C — Sync engine.** C1 Causal send/receive with echo tagging (§6.3) + unit tests. C2 Parent precedence + conflict handling. C3 Startup/first-appear guard (§8.4). C4 Fan-out to scope members. C5 Logging (§7.6).
+**Epic C — Sync engine.** C1 Causal send/receive with echo tagging (§6.3) + unit tests. C2 Parent precedence + conflict handling. C3 Startup/first-appear guard (§8.6). C4 Fan-out to scope members. C5 Logging (§7.6).
 
 **Spike-1 — Subpage targeting [gate].** Run early-but-parallel; result decides whether §7.5 subpage sync is in or out. Does not block A–C.
 

@@ -33,7 +33,9 @@ visible (`com.johnmschoonover.decksync.sdPlugin/logs/`).
 3. Leave the folder. Record whether the page-0 anchor's appear fires again.
 
 **Part B — driving.**
-1. In the configuration UI add an override pairing parent page `1` ↔ child page `9`.
+0. In the configuration UI set the child's *Pages* to `10` and Save (overrides beyond a
+   device's page count are rejected).
+1. Add an override pairing parent page `1` ↔ child page `9` and Save.
 2. Flip the parent to page 1 by hand. Watch the child and the log:
    - lands inside the folder → **works** (the flat index reaches folder pages; note which
      index did it: 5? 9? another?);

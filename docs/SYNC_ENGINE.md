@@ -9,11 +9,13 @@ The engine is pure TypeScript; the SDK is injected as `Switcher`, `Clock`, `Log`
 ## State
 
 Per device: `armed` (false until its first appear after start/connect), `disconnected`
-(set by a disconnect so that only a real reconnect disarms the device), `lastKnownPage`
-(null when unknown), `pending` — the switches the engine issued to it that have not landed,
-in issue order, each with an `expired` flag — and `lastSendSeq`/`lastSendPage` (its most
-recent human send). A global `seq` numbers sends. Nothing else; there is no scope-level
-"in flight" flag.
+(set by a disconnect and cleared when an appear arms the device, so that only a real
+reconnect disarms it), `lastKnownPage` (null when unknown), `pending` — the switches the
+engine issued to it that have not landed, in issue order, each with an `expired` flag —
+`lastHumanSeq`/`lastHumanPage` (its most recent human navigation: a SEND, or a navigation
+ignored as disabled or unscoped; a suppressed one is discarded), and the timestamps of its
+recent SENDs for the storm breaker. A global `seq` numbers human navigations and
+stale-switch restores. Nothing else; there is no scope-level "in flight" flag.
 
 ## Classifying an appear
 
@@ -24,12 +26,13 @@ In this order; the first rule that fires decides.
 | 1 | anchor is inside a multi-action | IGNORED (not a page marker) |
 | 2 | no valid `pageIndex` | IGNORED; warn once per anchor |
 | 3 | `lastKnownPage === page` | IGNORED duplicate (second anchor on the page, editor re-emit); consumes a matching pending entry if one exists |
-| 4 | earliest pending entry for this page exists | **RECEIVE** — terminal. Entries issued before it are dropped as superseded (the app showed only the last of rapid switches). If the entry predates the device's own later send and that page is not pending, it is **RECEIVE_STALE**: swallowed and the human's page restored |
+| 4 | earliest pending entry for this page exists | **RECEIVE** — terminal. Entries issued before it are dropped as superseded (the app showed only the last of rapid switches). If the entry is still expected (not expired), predates the device's own later human navigation, and nothing issued after that navigation is heading for the device, it is **RECEIVE_STALE**: swallowed and the human's last page restored. A late (expired) match is a plain RECEIVE: it may be the human flipping to a page the engine once sent the device to, and fighting that would be worse than one missed sync |
 | 5 | device not armed | STARTUP: arm, record page, no sync (PRD §4.4) |
-| 6 | device in no scope | IGNORED; log once per device per settings version |
-| 7 | anchor disabled | IGNORED |
-| 8 | child **and** a parent-issued entry on it is still expected (not expired) | **SUPPRESSED** (parent wins; its switch lands) |
-| 9 | otherwise | **SEND** |
+| 6 | device in no scope | IGNORED (recorded as the human's page); warn once per device per settings version |
+| 7 | anchor disabled | IGNORED (recorded as the human's page) |
+| 8 | child **and** a parent-issued entry on it is still expected (not expired) | **SUPPRESSED** (parent wins; its switch lands); the navigation is discarded, not recorded |
+| 9 | more than 6 SENDs from this device within 1.5 s | IGNORED send-storm (warn): a circuit breaker for pages carrying a copied anchor with the wrong index, which would otherwise make two decks drive each other forever; not a classifier |
+| 10 | otherwise | **SEND** |
 
 Everything that is not an echo or startup is human (PRD §6.3.2). No rule consults elapsed time.
 
@@ -64,8 +67,11 @@ that page, so the order of appear(new)/disappear(old) does not matter; it never 
   landed may lead while a sibling's is still in flight (PRD §8.6, to ratify).
 - A **parent** appear is never suppressed. Should a switch issued before the parent's send
   still land on it afterwards, the RECEIVE_STALE rule swallows it and restores the parent's
-  page. Both orders of a parent/child cross-fire therefore end with everyone on the
-  parent's page (tests E16, AC (c)); the same rule keeps peers consistent (test E15).
+  page — unless a switch issued after the parent's navigation is already heading for it,
+  in which case that later switch wins and nothing is restored. Both orders of a
+  parent/child cross-fire therefore end with everyone on the parent's page (tests E16,
+  AC (c)); the same rule keeps peers consistent (test E15) and never lets a child's stale
+  switch outrun the parent's (test R2-F4).
 
 ## Mapping
 
@@ -98,9 +104,12 @@ classification of an appear; it only ends suppression and prediction.
 
 The bounded cost is the inherent ambiguity of an unconsumed tag: a human navigation to
 exactly the page of a dangling entry, within the grace period, is swallowed once as a
-RECEIVE (the scope is then out of step until the next flip). With bundled profiles that
-anchor every page this needs a coalesced burst or an already-aligned target with an unknown
-page; hardware checks C-11/C-12 in `docs/MANUAL_TESTS.md` measure how often it happens.
+RECEIVE (the scope is then out of step until the next flip). Within the first 3 s, while
+the tag is still expected, such a flip can additionally trigger a restore if it follows
+another human navigation on the same device (the deck jumps back once); after the TTL a
+match is only ever swallowed, never fought. With bundled profiles that anchor every page
+this needs a coalesced burst or an already-aligned target with an unknown page; hardware
+checks C-11/C-12 in `docs/MANUAL_TESTS.md` measure how often it happens.
 
 ## Settings changes
 
@@ -109,8 +118,10 @@ configuration, detach every pending entry (marked expired: their origins belonge
 old topology, but they stay echo tags) and keep `armed`/`lastKnownPage`/last send. A reload
 that changes nothing is ignored, because the global-settings event also fires for plain
 reads. A switch that lands after a reload is therefore still a RECEIVE. After start, an
-unusable settings payload (wrong version, not an object) is ignored with a warning rather
-than replacing a working configuration with zero scopes (`src/plugin.ts`).
+unusable settings payload (not an object, wrong version, or `scopes` not an array) is
+ignored with a warning rather than replacing a working configuration with zero scopes
+(`createGlobalSettingsHandler` in `src/piBridge.ts`); before start the event is ignored
+because the start-up load applies the settings.
 
 ## Logging
 
@@ -118,20 +129,23 @@ Every line is `EVENT key=value …`; the code is canonical, this is the index.
 
 | Level | Events |
 |---|---|
-| info | `START`, `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` (`late=true` after the TTL), `RECEIVE_STALE`, `STARTUP`, `SUPPRESSED`, `IGNORED reason=disabled`, `IGNORED reason=no-scope` (once per device per settings version), `SKIP reason=no-counterpart`, `DEVICE connected`, `DEVICE disconnected` |
-| warn (with an actionable clause) | `SKIP reason=disconnected`, `SKIP reason=no-profile`, `SWITCH failed`, `SWITCH unconfirmed`, `RESTORE skipped`, `IGNORED reason=no-page-index` (once per anchor) |
+| info | `START`, `SETTINGS applied`, `SEND` (device, role, scope, page, canonical page, seq, targets, skips), `RECEIVE` (`late=true` after the TTL), `RECEIVE_STALE`, `STARTUP`, `SUPPRESSED`, `IGNORED reason=disabled`, `SKIP reason=no-counterpart`, `DEVICE connected`, `DEVICE disconnected` |
+| warn (with an actionable clause) | `IGNORED reason=no-scope` (once per device per settings version), `IGNORED reason=no-page-index` (once per anchor), `IGNORED reason=send-storm`, `SKIP reason=disconnected` / `no-profile` / `error`, `SWITCH failed`, `SWITCH unconfirmed`, `RESTORE skipped` |
 | debug | `SETTINGS unchanged`, `DEVICE connected (already armed)`, `IGNORED reason=duplicate` / `multi-action` / repeated `no-scope` / repeated `no-page-index`, `SKIP reason=already-there`, `SWITCH sent`, `LEAVE`, `GC reason=superseded` / `grace-elapsed` / `cap` |
 | error | `UNEXPECTED handler=onAppear …` (caught, never rethrown) |
 
-Settings validation and Property Inspector messages are logged under the plugin's
-`DeckSync` scope by `src/piBridge.ts` and `src/plugin.ts`.
+Under the plugin's `DeckSync` scope (`src/piBridge.ts`, `src/plugin.ts`): `Settings saved:
+n scope(s).` (info), `Settings: …` (warn: a rejected scope and why, an ignored unusable
+payload), `PI: …` (warn when a reply could not be sent; debug when no panel is open),
+`Startup failed: …` (error).
 
 ## What only hardware can confirm
 
-1. The app applies several `switchToProfile` calls to one device in order (or shows only the last). Test: flip the parent 1→3→1 quickly; children must end on 1 (manual check C-11 also records whether intermediate pages appear).
+1. The app applies several `switchToProfile` calls to one device in order (or shows only the last). Test: manual check C-11 (parent 0→1→2→1→0 as fast as possible; the child must end on 0, and the log records whether the intermediate pages appeared).
 2. Whether a switch to the page a device is already on emits `willAppear`. Handled either way; routine `SWITCH unconfirmed` warnings in the log would mean an anchor is missing or a profile is not bundled.
-2a. Whether the app sends `deviceDidConnect` for already-connected devices at launch, before or after their first appears. Handled either way (a connect for a device that never disconnected does not disarm it).
+2a. `isConnected` comes from `deviceDidConnect`: the SDK lists registration-time devices as not connected until that event arrives, so a flip made before a member's connect event skips it with `SKIP … reason=disconnected`. The arming logic itself does not depend on the order of connect events and appears (a connect for a device that never disconnected, or whose reconnect burst already arrived, does not disarm it).
 2b. Echo latency: a landing later than 3 s is absorbed as a late RECEIVE (manual check C-12); if late echoes are routine, raise `pendingTtlMs`.
+2c. Copied anchors with a wrong page index make a page report two indices; a single one silently overturns a navigation, a cycle of them trips the send-storm breaker (warn). The fix is always the anchor, not the engine.
 3. `willDisappear` fires for every left page. If not, "leave to an un-anchored page and come back" is read as a duplicate once; fallback is de-duplicating on action id instead of page.
 4. The launch burst is one appear per anchor on each device's *current* page. If the app also emits appears for other pages at launch, `lastKnownPage` could be wrong until the first flip.
 5. Whether editing a page in the Stream Deck editor emits appears without navigating the device.

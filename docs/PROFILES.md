@@ -27,7 +27,11 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 
 The engine resolves a scope member's profile from its `profile` setting, or, when that is
 blank, from the device type using the `Name`s above (see `src/profiles.ts`). Any other
-device type must have `profile` set explicitly in the configuration UI.
+device type must have `profile` set explicitly in the configuration UI. **Every profile
+registered in `manifest.json → Profiles` must also appear in `DEFAULT_PROFILE_BY_DEVICE_TYPE`**
+(`src/tests/profiles.test.ts` enforces it), so when you bundle `profiles/plus`, add
+`7: "profiles/plus"` to the table; "set its *Profile* manually" is only for a profile that
+is *not* bundled under its device type's default name.
 
 ## Procedure (Stream Deck app, plugin installed and loading — after gate A3)
 

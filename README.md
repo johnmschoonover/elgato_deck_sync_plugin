@@ -61,7 +61,8 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
    asked to switch to user-made profiles). Authoring and bundling them is a manual step
    described in [`docs/PROFILES.md`](docs/PROFILES.md): 5 pages, one Page Anchor per page
    with its page index set. Until profiles are bundled, the app ignores or rejects each
-   switch request: `SWITCH unconfirmed … profile` (after 3 s) or `SWITCH failed …` in the log.
+   switch request: `SWITCH unconfirmed … profile` (written the next time the plugin touches
+   that device, at least 3 s later) or `SWITCH failed …` in the log.
 2. **Anchors.** Every page that should sync needs one Page Anchor whose *Page index* is the
    page's 0-based position. Bundled profiles come with them pre-placed; on your own pages
    drag **Deck Sync → Page Anchor** onto any key and set the index in its Property
@@ -73,7 +74,13 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
      manifest profile name such as `profiles/original`.
    - *Pages*: how many top-level pages that profile has (default 5).
    - Under the scope, add **overrides** (parent page ↔ child page) where the decks don't line up.
-   - Click **Save**. Problems are shown inline and nothing invalid is saved.
+   - Click **Save**. Problems are shown inline and nothing invalid is saved; **Discard
+     changes** returns to the saved configuration.
+
+   The panel's controls stay disabled until the saved configuration has loaded ("Loading the
+   saved configuration…"). "Waiting for the plugin…" or "No reply from the plugin — is it
+   running?" means the plugin did not answer: check it is running, then close and reopen the
+   panel. "Disconnected from Stream Deck" means the app restarted under the panel: reopen it.
 4. Flip pages on any deck in the scope; the others follow.
 
 ## Reading the log
@@ -94,8 +101,9 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 | `STARTUP dev=C1 page=0 (armed; no sync)` | first appear after launch/reconnect |
 | `SUPPRESSED dev=C1 page=1 … reason=parent-in-flight` | child flip while the parent's switch to it was landing |
 | `IGNORED … reason=disabled` (info) | the page's marker is disabled; nothing sent |
-| `IGNORED … reason=no-scope` (warn once per device, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
-| `IGNORED … reason=send-storm` (warn) | the breaker tripped: look for a copied anchor with the wrong page index on that device |
+| `IGNORED … reason=no-scope` (warn once per device per saved configuration, then *debug*) / `no-page-index` (warn once per anchor) | the device is in no scope / the anchor has no page index |
+| `IGNORED … reason=conflicting-anchors` (warn) | the breaker tripped: a page on that device carries a copied anchor with the wrong page index |
+| `QUEUED … reason=not-started`, `DRIVEN …`, `SETTINGS unchanged (update)` *(debug)* | a flip before the settings loaded (replayed), a send right after a receive, a reload that changed nothing |
 | `IGNORED … reason=duplicate` / `multi-action` *(debug)* | second anchor on the page / not a page marker |
 | `SKIP target=C2 … reason=disconnected` / `no-profile` / `error` (warn), `no-counterpart` (info), `already-there` *(debug)* | member skipped, with the fix |
 | `SWITCH sent …` *(debug)*; `SWITCH failed dev=C1 profile=… error="…"` (warn) | the request was written / the app rejected it |
@@ -129,7 +137,7 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
 - Button state is not synced, only the page.
 - Page Anchors inside Multi Actions are ignored (the action is not offered there).
 - Copied anchors whose page index was not updated make a page report two indices; a
-  send-storm breaker stops the resulting ping-pong, but the fix is the anchor's index.
+  conflicting-anchor breaker stops the resulting ping-pong, but the fix is the anchor's index.
 
 ## Development
 
@@ -151,7 +159,9 @@ the final UUID/author domain (PRD OQ-6).
 | `src/syncEngine.ts` | the causal send/receive engine (design: `docs/SYNC_ENGINE.md`) |
 | `src/settings.ts`, `src/mapping.ts`, `src/profiles.ts` | settings schema + validation, page mapping, default profile names |
 | `src/actions/page-anchor.ts` | the Page Anchor action (SDK event → engine input) |
-| `src/piBridge.ts`, `src/piProtocol.ts` | plugin side of the Property Inspector protocol |
+| `src/piBridge.ts`, `src/piProtocol.ts` | plugin side of the Property Inspector protocol, global-settings handler |
+| `src/ids.ts`, `src/log.ts` | plugin/action UUIDs (checked against the manifest), logger contract |
+| `scripts/make-placeholder-icons.mjs` | placeholder icon generator (`npm run icons`) |
 | `com.johnmschoonover.decksync.sdPlugin/ui/anchor.html` | marker settings + Deck Sync setup UI |
 | `docs/` | engine design, profile authoring, manual test matrix, Spike-1 |
 

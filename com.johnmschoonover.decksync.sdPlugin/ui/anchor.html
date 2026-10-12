@@ -21,6 +21,7 @@
     .ds-scope summary { cursor: pointer; }
     .ds-page { width: 3.5em !important; }
     .ds-block { padding: 0 8px; }
+    [aria-invalid="true"] { outline: 1px solid #eb5757; }
   </style>
 </head>
 <body class="sdpi-wrapper">
@@ -52,7 +53,7 @@
   </div>
   <div class="ds-block" id="setup"></div>
   <div class="ds-block ds-row">
-    <button id="addScope">Add scope</button>
+    <button id="addScope" disabled>Add scope</button>
     <button id="save" disabled>Save</button>
     <button id="discard">Discard changes</button>
   </div>
@@ -164,14 +165,19 @@
           }
           case "globalSettings":
             clearSaveTimeout();
+            saved = payload.settings || { version: 2, scopes: [] };
             if (!loaded) {
+              // The first load is authoritative: nothing edited before it can be trusted.
               loaded = true;
               if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
               $("save").disabled = false;
-              if ($("status").textContent.startsWith("Waiting")) setStatus("", "");
-            }
-            saved = payload.settings || { version: 2, scopes: [] };
-            if (statusWasSaving || !dirty) {
+              $("addScope").disabled = false;
+              const discarded = dirty;
+              draft = clone(saved);
+              dirty = false;
+              renderSetup();
+              setStatus(discarded ? "Configuration loaded; edits made before it arrived were discarded." : "", discarded ? "err" : "");
+            } else if (statusWasSaving || !dirty) {
               draft = clone(saved);
               dirty = false;
               renderSetup();
@@ -295,8 +301,12 @@
       function syncParentId(scope) {
         const p = scope.members.find((m) => m.role === "parent");
         scope.parentDeviceId = p ? p.deviceId : "";
-        // Overrides pin a parent page to a child page; drop any that no longer do.
-        scope.mapping.overrides = scope.mapping.overrides.filter((o) =>
+      }
+
+      /** Overrides that still pin a page of the current parent to a page of a current child. */
+      function validOverrides(scope) {
+        const p = scope.members.find((m) => m.role === "parent");
+        return scope.mapping.overrides.filter((o) =>
           p && o.a.deviceId === p.deviceId && scope.members.some((m) => m.deviceId === o.b.deviceId && m.role === "child"));
       }
 
@@ -339,20 +349,31 @@
 
       function renderSetup() {
         const root = $("setup");
-        // Re-rendering replaces every control; put the keyboard focus back where it was.
-        const focused = document.activeElement && document.activeElement.dataset ? document.activeElement.dataset.focus : null;
+        // Re-rendering replaces every control; put the keyboard focus (and caret) back where it was.
+        const active = document.activeElement;
+        const focused = active && active.dataset ? active.dataset.focus : null;
+        const caret = focused && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
         root.replaceChildren();
         try {
           renderSetupInto(root);
         } finally {
           if (focused) {
             const again = root.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
-            if (again) again.focus();
+            if (again) {
+              again.focus();
+              if (caret && typeof again.setSelectionRange === "function") {
+                try { again.setSelectionRange(caret[0], caret[1]); } catch { /* not a text control */ }
+              }
+            }
           }
         }
       }
 
       function renderSetupInto(root) {
+        if (!loaded) {
+          root.append(el("div", { class: "ds-muted" }, "Loading the saved configuration…"));
+          return;
+        }
         const ids = allDeviceIds();
         if (!ids.length) {
           root.append(el("div", { class: "ds-muted" }, "No Stream Deck devices known yet."));
@@ -391,9 +412,10 @@
             oninput: (ev) => {
               if (!member) return;
               const n = readNumber(ev.target, 1, "Pages must be a whole number, 1 or more.");
+              const blank = ev.target.value.trim() === "" && !(ev.target.validity && ev.target.validity.badInput);
               if (n !== undefined) member.pageCount = n;
-              else if (ev.target.value.trim() === "" && !(ev.target.validity && ev.target.validity.badInput)) delete member.pageCount;
-              markDirty();
+              else if (blank) delete member.pageCount;
+              if (n !== undefined || blank) markDirty(); // an invalid value keeps its message on screen
             },
           });
           tbody.append(el("tr", {}, el("td", {}, deviceName(id)), el("td", {}, scopeSelect), el("td", {}, roleSelect), el("td", {}, profileInput), el("td", {}, pagesInput)));
@@ -425,7 +447,9 @@
 
         if (parent && children.length) {
           box.append(el("div", { class: "ds-muted" }, "Overrides pin a parent page to a child page (both directions); other pages map positionally."));
-          scope.mapping.overrides.forEach((o, i) => box.append(renderOverride(scope, parent, children, o, i)));
+          const stale = scope.mapping.overrides.length - validOverrides(scope).length;
+          if (stale) box.append(el("div", { class: "ds-muted" }, `${stale} override(s) no longer involve the parent and will be dropped on Save (Discard changes restores them).`));
+          scope.mapping.overrides.forEach((o, i) => { if (validOverrides(scope).includes(o)) box.append(renderOverride(scope, parent, children, o, i)); });
           box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", "data-focus": `addov:${scope.id}`, onclick: change(() => {
             scope.mapping.overrides.push({ a: { deviceId: parent.deviceId, page: 0 }, b: { deviceId: children[0].deviceId, page: 0 } });
           }) }, "Add override")));
@@ -465,7 +489,10 @@
           draft.scopes = draft.scopes.filter((s) => s.members.length > 0);
           renderSetup();
         }
-        for (const s of draft.scopes) syncParentId(s);
+        for (const s of draft.scopes) {
+          syncParentId(s);
+          s.mapping.overrides = validOverrides(s); // overrides are parent-relative; kept in the draft until now so role changes round-trip
+        }
         if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes: draft.scopes } })) {
           setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;

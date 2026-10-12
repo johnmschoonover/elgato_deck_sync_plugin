@@ -44,7 +44,7 @@ streamDeck
   .then(async () => {
     // Devices are known only after connecting; start never issues a switch.
     const { settings } = await loadGlobalSettings(log);
-    engine.start(settings);
     started = true;
+    await engine.start(settings);
   })
   .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

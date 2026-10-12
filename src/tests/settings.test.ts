@@ -190,6 +190,12 @@ describe("validateGlobalSettings", () => {
     expect(result.issues[0].message).toMatch(reason);
   });
 
+  test("a scope that is not an object is reported by index; a mapping without overrides defaults to none", () => {
+    const result = validateGlobalSettings({ version: 2, scopes: [null, "x", { ...desk, mapping: { mode: "positional" } }] });
+    expect(result.issues.map((i) => i.message)).toEqual(["Scope at index 0 ignored: not an object.", "Scope at index 1 ignored: not an object."]);
+    expect(result.settings.scopes).toEqual([{ ...desk, mapping: { mode: "positional", overrides: [] } }]);
+  });
+
   test("a scope without an id is reported by index", () => {
     const result = validateGlobalSettings(withScope({ id: "" }));
     expect(result.settings.scopes).toEqual([]);

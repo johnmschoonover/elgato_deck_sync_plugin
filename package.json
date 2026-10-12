@@ -14,6 +14,7 @@
   },
   "devDependencies": {
     "@elgato/cli": "^1.10.2",
+    "@elgato/utils": "^0.4.5",
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",
@@ -30,5 +31,11 @@
   "license": "MIT",
   "engines": {
     "node": ">=22"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnmschoonover/elgato_deck_sync_plugin.git"
+  },
+  "author": "John Schoonover",
+  "homepage": "https://github.com/johnmschoonover/elgato_deck_sync_plugin#readme"
 }

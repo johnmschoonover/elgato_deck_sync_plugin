@@ -51,6 +51,14 @@ describe("resolveTargetPage", () => {
     expect(map("C2", 3, "P")).toBeUndefined();
   });
 
+  test("a child page beyond the parent's page count has no counterpart (the parent is the canonical coordinate)", () => {
+    const small: Scope = { ...scope, members: [{ deviceId: "P", role: "parent", pageCount: 3 }, C1, C2], mapping: { mode: "positional", overrides: [] } };
+    expect(resolveTargetPage(small, { deviceId: "C1", page: 4 }, "P")).toBeUndefined();
+    expect(resolveTargetPage(small, { deviceId: "C1", page: 4 }, "C2")).toBeUndefined();
+    expect(resolveTargets(small, { deviceId: "C1", page: 4 }).map((t) => t.page)).toEqual([undefined, undefined]);
+    expect(resolveTargetPage(small, { deviceId: "C1", page: 2 }, "P")).toBe(2);
+  });
+
   test("child ↔ child goes through the parent's coordinate", () => {
     expect(map("C1", 4, "C2")).toBe(2); // C1:4 → P:2 → C2:2
     expect(map("C2", 2, "C1")).toBe(4); // C2:2 → P:2 → C1:4

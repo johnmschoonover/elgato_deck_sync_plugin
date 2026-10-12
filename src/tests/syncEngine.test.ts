@@ -94,7 +94,7 @@ function harness(scope: Scope | Scope[] = deskScope(), options: EngineOptions = 
   const page = (dev: string) => state(dev).lastKnownPage;
   /** Start and replay the launch burst: everyone on page 0, nothing issued. */
   const boot = async (ids = ["P", "C1", "C2"]) => {
-    engine.start(settings);
+    await engine.start(settings);
     for (const id of ids) expect((await appear(id, 0)).classification).toBe("STARTUP");
     expect(sw.calls).toEqual([]);
   };
@@ -162,7 +162,7 @@ describe("PRD §7.3 acceptance criteria", () => {
 
   test("(d) startup appears are suppressed", async () => {
     const h = harness();
-    h.engine.start(h.settings);
+    await h.engine.start(h.settings);
     expect(await h.cls(h.appear("P", 2, { actionId: "a" }))).toBe("STARTUP");
     expect((await h.appear("P", 2, { actionId: "b" })).reason).toBe("duplicate");
     expect(await h.cls(h.appear("C1", 0))).toBe("STARTUP");
@@ -220,7 +220,7 @@ describe("edge cases", () => {
     expect(h.state("C1").pending[0].expired).toBe(false); // not expired at exactly the TTL
     h.clock.advance(1);
     await h.nav("P", 1); // ages C1's entries during fan-out planning
-    expect(h.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[3, true], [1, false]]);
+    expect(h.state("C1").pending.map((p) => [p.page, p.expired])).toEqual([[3, "ttl"], [1, false]]);
     expect(h.log.find("warn", /^SWITCH unconfirmed dev=C1 profile=profiles\/mini page=3 seq=1 origin=P — no appear within 3000ms/)).toHaveLength(1);
     h.clock.advance(31000);
     await h.appear("C2", 1);
@@ -333,11 +333,12 @@ describe("edge cases", () => {
     expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: false })]);
     expect(h.log.find("debug", /^SETTINGS unchanged/)).toHaveLength(1);
     h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" })));
-    expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: true })]);
+    expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: "detached" })]);
     expect([h.page("P"), h.page("C1"), h.page("C2")]).toEqual([2, 0, 0]);
     expect(h.engine.snapshot().devices.every((d) => d.armed)).toBe(true);
     expect(h.log.find("info", /^SETTINGS applied \(update\) scopes=\[desk\{parent=P,children=2,overrides=1\}\] detachedPending=2$/)).toHaveLength(1);
-    expect(await h.appear("C1", 4)).toMatchObject({ classification: "RECEIVE", late: true, issued: [] });
+    expect(await h.appear("C1", 4)).toMatchObject({ classification: "RECEIVE", late: false, issued: [] });
+    expect(h.log.find("info", /^RECEIVE dev=C1 page=4 seq=1 origin=P detached=true/)).toHaveLength(1);
     expect(await h.cls(h.appear("C2", 2))).toBe("RECEIVE");
     expect(h.sw.calls).toHaveLength(2);
     // a detached parent-origin entry no longer suppresses the child
@@ -357,7 +358,7 @@ describe("edge cases", () => {
 
   test("E12 an anchor without a page index warns once and changes nothing", async () => {
     const h = harness();
-    h.engine.start(h.settings);
+    await h.engine.start(h.settings);
     for (let i = 0; i < 3; i++) expect((await h.appear("P", undefined, { actionId: "z" })).reason).toBe("no-page-index");
     expect(h.log.find("warn", /reason=no-page-index/)).toHaveLength(1);
     expect(h.log.find("warn", /action=z/)).toHaveLength(1);
@@ -375,6 +376,9 @@ describe("edge cases", () => {
     expect(h.log.find("warn", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(1); // PRD §7.6: recoverable → warn, once
     expect(h.log.find("debug", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(1);
     expect(h.sw.calls).toEqual([]);
+    h.engine.onSettingsChanged(settingsWith(deskScope({ name: "Desk 2" }))); // a new configuration that still leaves X out
+    expect((await h.nav("X", 4)).reason).toBe("no-scope");
+    expect(h.log.find("warn", /^IGNORED dev=X .*reason=no-scope/)).toHaveLength(2); // warned again for the new configuration
     const scope = deskScope();
     scope.members.push({ deviceId: "X", role: "child" });
     h.engine.onSettingsChanged(settingsWith(scope));
@@ -607,34 +611,149 @@ describe("review findings", () => {
     expect(await h.cls(h.nav("C1", 2))).toBe("SEND");
   });
 
-  test("R2-F2 stray anchors with wrong page indices cannot drive two decks forever: the send-storm breaker trips", async () => {
+  /** A two-device scope where copied anchors carry wrong page indices, plus a simulated app. */
+  function strayAnchorRig(hopMs: number) {
     const scope = deskScope({ members: [{ deviceId: "P", role: "parent", profile: "profiles/plus" }, { deviceId: "C1", role: "child" }], mapping: { mode: "positional", overrides: [] } });
     const h = harness(scope);
-    await h.boot(["P", "C1"]);
-    // Copied anchors whose page index was never updated: P page 2 also says 1, P page 3 also says 4,
-    // C1 page 1 also says 3, C1 page 4 also says 2.
+    // P page 2 also says 1, P page 3 also says 4, C1 page 1 also says 3, C1 page 4 also says 2.
     const strays: Record<string, Record<number, number>> = { P: { 2: 1, 3: 4 }, C1: { 1: 3, 4: 2 } };
     const current: Record<string, number> = { P: 0, C1: 0 };
-    // A simulated app: apply queued switches by emitting disappear for the old page and appear for every anchor on the new one.
     let applied = 0;
-    const drain = async () => {
-      while (applied < h.sw.calls.length && applied < 200) {
+    // Apply queued switches: disappear for the old page, then an appear for every anchor on the new one.
+    const drain = async (max = 400) => {
+      while (applied < h.sw.calls.length && applied < max) {
         const { deviceId, page } = h.sw.calls[applied++];
+        h.clock.advance(hopMs);
         h.leave(deviceId, current[deviceId]);
         current[deviceId] = page;
         await h.appear(deviceId, page, { actionId: `${deviceId}-p${page}` });
         const stray = strays[deviceId][page];
         if (stray !== undefined) await h.appear(deviceId, stray, { actionId: `${deviceId}-stray-on-${page}` });
-        h.clock.advance(50);
       }
     };
+    return { h, current, drain };
+  }
+
+  test("R2-F2/R3-F2 stray anchors cannot drive two decks forever, even at realistic switch latency", async () => {
+    for (const hopMs of [50, 300, 1000]) {
+      const { h, current, drain } = strayAnchorRig(hopMs);
+      await h.boot(["P", "C1"]);
+      h.leave("P", 0);
+      current.P = 1;
+      await h.appear("P", 1); // one human flip
+      await drain();
+      expect(h.sw.calls.length).toBeLessThan(40);
+      const trips = h.log.find("warn", /reason=conflicting-anchors/);
+      expect(trips.length).toBeGreaterThan(0);
+      expect(trips[0].msg).toMatch(/a Page Anchor on its pages reports the wrong page index/);
+    }
+  });
+
+  test("R3-F2 rapid human flipping never trips the breaker", async () => {
+    const h = harness();
+    await h.boot();
+    for (const to of [1, 2, 3, 4, 3, 2, 1, 2, 3, 4]) {
+      h.clock.advance(150); // ~7 presses per second
+      expect(await h.cls(h.nav("P", to))).toBe("SEND");
+    }
+    expect(h.log.find("warn", /conflicting-anchors/)).toHaveLength(0);
+    expect(h.sw.calls[h.sw.calls.length - 1]).toEqual(h.call("C2", "profiles/xl", 4));
+  });
+
+  test("R3-F2 a child flipping away right after each of the parent's switches is not a conflict", async () => {
+    const h = harness();
+    await h.boot();
+    for (let i = 0; i < 20; i++) {
+      const page = 1 + 2 * (i % 2); // 1 or 3: pages without an override, so C1 maps positionally
+      h.clock.advance(500);
+      await h.nav("P", page); // parent flips; C1#page in flight
+      await h.appear("C1", page); // lands → RECEIVE (driven)
+      expect(await h.cls(h.nav("C1", 0))).toBe("SEND"); // the human leaves the page (LEAVE) and flips: not driven
+    }
+    expect(h.log.find("warn", /conflicting-anchors/)).toHaveLength(0);
+  });
+
+  test("R3-F17 after tripping, the breaker lets the device send again once the window has passed", async () => {
+    const { h, current, drain } = strayAnchorRig(100);
+    await h.boot(["P", "C1"]);
     h.leave("P", 0);
     current.P = 1;
-    await h.appear("P", 1); // one human flip
+    await h.appear("P", 1);
     await drain();
-    expect(h.sw.calls.length).toBeLessThan(20);
-    expect(h.log.find("warn", /reason=send-storm/).length).toBeGreaterThan(0);
-    expect(h.log.find("warn", /reason=send-storm/)[0].msg).toMatch(/check this device's pages for a Page Anchor with the wrong page index/);
+    expect(h.log.find("warn", /conflicting-anchors/).length).toBeGreaterThan(0);
+    h.clock.advance(30001);
+    const calls = h.sw.calls.length;
+    h.leave("P", current.P);
+    expect(await h.cls(h.appear("P", 0))).toBe("SEND");
+    expect(h.sw.calls.length).toBeGreaterThan(calls);
+  });
+
+  test("R3-F3 human navigation before start() is queued and replayed once the settings are known", async () => {
+    const h = harness();
+    expect(await h.cls(h.appear("P", 0))).toBe("STARTUP"); // the launch burst
+    expect(await h.cls(h.appear("C1", 0))).toBe("STARTUP");
+    expect(await h.nav("P", 1)).toMatchObject({ classification: "IGNORED", reason: "not-started" }); // a flip before the settings loaded
+    expect(h.sw.calls).toEqual([]);
+    expect(h.log.find("warn", /no-scope/)).toHaveLength(0);
+    await h.engine.start(h.settings);
+    expect(h.sw.calls).toEqual([h.call("C1", "profiles/mini", 1), h.call("C2", "profiles/xl", 1)]);
+    expect(h.log.find("info", /^START .*queued=1$/)).toHaveLength(1);
+    expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE");
+  });
+
+  test("R3-F4 a child flipping to a disabled page while the parent's switch is in flight is still suppressed", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 2); // C1#4 (origin parent)
+    expect(await h.cls(h.nav("C1", 3, { enabled: false }))).toBe("SUPPRESSED");
+    expect(h.state("C1").lastHumanSeq).toBe(0);
+    expect(await h.cls(h.appear("C1", 4))).toBe("RECEIVE"); // the parent's switch lands and stays
+    expect(h.sw.calls).toHaveLength(2);
+    expect([h.page("P"), h.page("C1")]).toEqual([2, 4]);
+  });
+
+  test("R3-F5 a member is not skipped as already-there on the strength of a switch the stale rule would undo", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("C1", 3); // seq 1: P#3 (slow), C2#3
+    await h.nav("P", 1); // seq 2: C1#1, C2#1 — P's own navigation outranks the pending P#3
+    expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE");
+    const out = await h.nav("C1", 3); // the child goes back to 3: P must be switched, not assumed there
+    expect(out.issued.map((i) => `${i.deviceId}#${i.page}`)).toContain("P#3");
+    expect(await h.cls(h.appear("P", 3))).toBe("RECEIVE"); // the old P#3 lands: a later switch is coming, no restore
+    expect((await h.appear("P", 3, { actionId: "second-landing" })).reason).toBe("duplicate");
+    expect([h.page("P"), h.page("C1")]).toEqual([3, 3]);
+  });
+
+  test("R3-F8 a parent relying on a child-issued switch still takes precedence over that child", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("C2", 1); // seq 1: P#1, C1#1 (origin child)
+    await h.appear("P", 1);
+    h.leave("P", 1);
+    const out = await h.appear("P", 1); // the parent asserts page 1 itself
+    expect(out.skipped).toEqual([{ deviceId: "C1", reason: "already-there" }, { deviceId: "C2", reason: "already-there" }]);
+    expect(h.state("C1").pending[0]).toMatchObject({ page: 1, originRole: "parent", originId: "P" });
+    expect(await h.cls(h.nav("C1", 2))).toBe("SUPPRESSED"); // before C1#1 lands, the child may not lead
+  });
+
+  test("R3-F15 start logs the applied configuration even on a fresh install", async () => {
+    const h = harness();
+    await h.engine.start({ version: 2, scopes: [] });
+    expect(h.log.find("info", /^SETTINGS applied \(start\) scopes=\[\] detachedPending=0$/)).toHaveLength(1);
+  });
+
+  test("R3-F16 a dependency that throws mid-classification is caught, logged, and the device recovers", async () => {
+    const h = harness();
+    await h.boot();
+    await h.nav("P", 1); // C1#1, C2#1 — C1's queue is non-empty, so ageing it consults the clock before any per-target guard
+    const realNow = h.clock.now;
+    h.clock.now = () => { throw new Error("clock broken"); };
+    expect(await h.nav("C1", 2)).toMatchObject({ classification: "IGNORED", reason: "error" });
+    expect(h.log.find("error", /^UNEXPECTED handler=onAppear dev=C1 page=2 error="clock broken"/)).toHaveLength(1);
+    h.clock.now = realNow;
+    expect(await h.cls(h.appear("C1", 1))).toBe("RECEIVE"); // the parent's switch lands as usual
+    expect(await h.cls(h.nav("C1", 3))).toBe("SEND"); // and the device is free to lead again
   });
 
   test("R2-F7 a failing target does not stop the fan-out and the send is still recorded", async () => {
@@ -672,10 +791,12 @@ describe("review findings", () => {
     h.clock.advance(3001);
     expect(await h.cls(h.nav("C1", 3))).toBe("SEND");
     expect(h.log.find("warn", /^SWITCH unconfirmed dev=C1 profile=profiles\/mini page=4 seq=1 origin=P/)).toHaveLength(1);
-    expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: true })]);
+    expect(h.state("C1").pending).toEqual([expect.objectContaining({ page: 4, expired: "ttl" })]);
     // an expired entry does not predict where the device is: a send to its page is issued again
     await h.appear("P", 3);
     await h.appear("C2", 3); // supersedes C2's own unconfirmed page-2 entry
+    expect(h.pendingPages("C2")).toEqual([]);
+    expect(h.log.find("debug", /^GC dev=C2 page=2 seq=1 reason=superseded by seq=2/)).toHaveLength(1);
     expect(await h.cls(h.nav("C2", 2))).toBe("SEND"); // → P#2, C1#4
     expect(h.sw.calls.filter((c) => c.deviceId === "C1").map((c) => c.page)).toEqual([4, 4]);
   });
@@ -712,7 +833,7 @@ describe("review findings", () => {
 
   test("F26 a switch issued to a device before its first appear is recognized as an echo and arms it", async () => {
     const h = harness();
-    h.engine.start(h.settings);
+    await h.engine.start(h.settings);
     await h.appear("P", 0);
     await h.nav("P", 1); // C1 and C2 have never appeared; their pages are unknown
     expect(h.sw.calls.map((c) => c.deviceId)).toEqual(["C1", "C2"]);
@@ -744,7 +865,7 @@ describe("review findings", () => {
   test("F26 an appear before start() is a startup appear and never throws", async () => {
     const h = harness();
     expect(await h.cls(h.appear("P", 0))).toBe("STARTUP");
-    h.engine.start(h.settings);
+    await h.engine.start(h.settings);
     expect(await h.cls(h.nav("P", 1))).toBe("SEND");
   });
 

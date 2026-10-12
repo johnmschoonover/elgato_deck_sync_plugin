@@ -10,15 +10,26 @@ import { DEFAULT_PROFILE_BY_DEVICE_TYPE, resolveProfile } from "../profiles";
 const PLUGIN_DIR = join(__dirname, "..", "..", "com.johnmschoonover.decksync.sdPlugin");
 const manifest = JSON.parse(readFileSync(join(PLUGIN_DIR, "manifest.json"), "utf8")) as { Profiles?: Array<{ DeviceType: number; Name: string }> };
 
+const bundled = manifest.Profiles ?? [];
+
 describe("bundled profiles", () => {
-  test("every manifest profile matches the default table for its device type and exists on disk", () => {
-    for (const p of manifest.Profiles ?? []) {
+  // Until D1's exports land the manifest registers no profiles; the test would be vacuous, so it is skipped explicitly.
+  (bundled.length ? test : test.skip)("every manifest profile matches the default table for its device type and exists on disk", () => {
+    for (const p of bundled) {
       expect(DEFAULT_PROFILE_BY_DEVICE_TYPE[p.DeviceType]).toBe(p.Name);
       expect(existsSync(join(PLUGIN_DIR, `${p.Name}.streamDeckProfile`))).toBe(true);
     }
   });
 
-  test.todo("D2: every default profile name is registered in manifest Profiles (waits on the D1 exports, docs/PROFILES.md)");
+  if (bundled.length) {
+    test("D2: every default profile name is registered in manifest Profiles", () => {
+      for (const [type, name] of Object.entries(DEFAULT_PROFILE_BY_DEVICE_TYPE)) {
+        expect(bundled).toContainEqual(expect.objectContaining({ DeviceType: Number(type), Name: name }));
+      }
+    });
+  } else {
+    test.todo("D2: every default profile name is registered in manifest Profiles (waits on the D1 exports, docs/PROFILES.md)");
+  }
 
   test("default names follow the docs/PROFILES.md convention", () => {
     for (const name of Object.values(DEFAULT_PROFILE_BY_DEVICE_TYPE)) expect(name).toMatch(/^profiles\/[a-z]+$/);

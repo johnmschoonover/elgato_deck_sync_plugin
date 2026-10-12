@@ -19,6 +19,8 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
 ```
 ├── PRD.md                                   # product spec (normative)
 ├── CLAUDE.md                                # this file
+├── README.md                                # user guide: install, configure, read the log, troubleshoot
+├── LICENSE / .gitignore                     # MIT; bin/, logs/ and node_modules/ are ignored
 ├── .claude/                                 # cloud-session settings + SessionStart hook (npm ci)
 ├── .github/workflows/ci.yml                 # typecheck + build + validate + test
 ├── docs/
@@ -73,7 +75,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 
 1. **No bundled profiles (D1, [gate]).** There is no `profiles/` directory; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
-3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor breaker, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached, left-page — PRD §8.6 "never forgotten"), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
+3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor and overturned-switch breakers, carrier promotion, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached, left-page — PRD §8.6 "never forgotten"), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
 4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).
 
 ## Conventions
@@ -85,7 +87,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 - **Logging:** one `EVENT key=value …` line per event (formats in `docs/SYNC_ENGINE.md`): info for SEND/RECEIVE/STARTUP/SUPPRESSED, warn with an actionable clause for recoverable errors (profile not found, device offline, no page index). No unhandled exceptions on bad config — `validateGlobalSettings` returns issues, it never throws.
 - **Engine purity:** `src/syncEngine.ts`, `settings.ts`, `mapping.ts`, `profiles.ts`, `log.ts`, `ids.ts` and `piProtocol.ts` import nothing from `@elgato/*` at runtime — `src/tests/purity.test.ts` enforces it (a type-only import such as `JsonObject` in `settings.ts`, from `@elgato/utils`, pinned as a devDependency, is erased); the SDK is touched only in `plugin.ts`, `piBridge.ts` and `actions/page-anchor.ts`. Keep it that way so every rule stays unit-testable. Time may only be used to age pending switches (expire/grace) — never to classify an appear or to trip the conflicting-anchor breaker (its run is counted structurally).
 - **The Property Inspector** (`ui/anchor.html`) is plain inline JS with no build step; it is tested in `src/tests/pi.test.ts` under jsdom with a fake Stream Deck socket (the coverage figure jest reports covers `src/` only, not this script). Add a case there for every behaviour change. Saves carry an `id` the plugin echoes, so the panel never takes a stale or load reply for a confirmation.
-- **Logs** land in `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored); line formats are listed in the README.
+- **Logs** land in the `logs/` folder inside the installed `.sdPlugin` folder — the repo's `com.johnmschoonover.decksync.sdPlugin/logs/` (gitignored) when linked; line formats are listed in the README.
 - Keep changes scoped to the task; don't refactor unrelated areas or bump dependency majors unless that is the task.
 
 ## Workflow

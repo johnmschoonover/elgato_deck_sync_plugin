@@ -1,16 +1,13 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "CommonJS",
-    "lib": ["ES2022", "ESNext.Disposable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "ESNext.Disposable", "DOM"],
     "strict": true,
     "skipLibCheck": true,
-    "outDir": "./dist-test",
-    "rootDir": "./src",
-    "baseUrl": ".",
-    "paths": {
-      "@elgato/utils": ["src/tests/__mocks__/@elgato/utils.ts"]
-    }
+    "noEmit": true,
+    "rootDir": "./src"
   },
   "include": ["src/**/*"]
 }

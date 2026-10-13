@@ -5,17 +5,23 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "rollup -c",
+    "build": "rollup -c --failAfterWarnings",
     "watch": "rollup -c -w --watch.onEnd=\"streamdeck restart com.johnmschoonover.decksync\"",
     "test": "jest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "validate": "streamdeck validate --no-update-check com.johnmschoonover.decksync.sdPlugin",
+    "icons": "node scripts/make-placeholder-icons.mjs"
   },
   "devDependencies": {
+    "@elgato/cli": "^1.10.2",
+    "@elgato/utils": "^0.4.5",
     "@rollup/plugin-commonjs": "^29.0.3",
     "@rollup/plugin-node-resolve": "^15.0.0",
     "@rollup/plugin-typescript": "^11.0.0",
     "@types/jest": "^30.0.0",
+    "@types/node": "^24.19.2",
     "jest": "^30.4.2",
+    "jest-environment-jsdom": "^30.5.2",
     "rollup": "^4.0.0",
     "ts-jest": "^29.4.11",
     "tslib": "^2.6.0",
@@ -23,5 +29,15 @@
   },
   "dependencies": {
     "@elgato/streamdeck": "^2.0.0"
-  }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnmschoonover/elgato_deck_sync_plugin.git"
+  },
+  "author": "John Schoonover",
+  "homepage": "https://github.com/johnmschoonover/elgato_deck_sync_plugin#readme"
 }

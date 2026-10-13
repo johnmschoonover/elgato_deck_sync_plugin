@@ -6,7 +6,9 @@
     "moduleResolution": "bundler",
     "strict": true,
     "skipLibCheck": true,
+    "types": ["node"],
     "outDir": "./com.johnmschoonover.decksync.sdPlugin/bin"
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*"],
+  "exclude": ["src/tests"]
 }

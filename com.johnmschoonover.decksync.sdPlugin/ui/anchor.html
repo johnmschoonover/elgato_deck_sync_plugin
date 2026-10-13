@@ -5,343 +5,729 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Page Anchor</title>
   <link rel="stylesheet" href="https://cdn.elgato.com/streamdeck/v1/sdpi.css" />
+  <style>
+    .ds-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .ds-table th, .ds-table td { padding: 3px 4px; text-align: left; vertical-align: middle; }
+    .ds-table th { opacity: .7; font-weight: 500; }
+    .ds-table select, .ds-table input { width: 100%; box-sizing: border-box; min-width: 0; }
+    .ds-muted { opacity: .6; font-size: 11px; }
+    .ds-status { font-size: 11px; margin: 6px 0; white-space: pre-wrap; }
+    .ds-status.ok { color: #6fcf97; }
+    .ds-status.err { color: #eb5757; }
+    .ds-row { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+    .ds-row > * { flex: 1; min-width: 0; }
+    .ds-row > button, .ds-row > .ds-fixed { flex: 0 0 auto; }
+    .ds-scope { border: 1px solid rgba(255, 255, 255, .12); border-radius: 4px; padding: 4px 8px; margin: 6px 0; }
+    .ds-scope summary { cursor: pointer; }
+    .ds-page { width: 3.5em !important; }
+    .ds-block { padding: 0 8px; }
+    [aria-invalid="true"] { outline: 1px solid #eb5757; }
+  </style>
 </head>
 <body class="sdpi-wrapper">
 
-  <!-- Enable toggle -->
-  <div class="sdpi-item" id="row-enabled">
+  <div class="sdpi-heading">This marker</div>
+  <div class="sdpi-item">
+    <label class="sdpi-item-label" for="pageIndex">Page index</label>
+    <input class="sdpi-item-value" id="pageIndex" type="number" min="0" step="1" placeholder="0 = first page" />
+  </div>
+  <div class="sdpi-item">
     <div class="sdpi-item-label">Enabled</div>
     <div class="sdpi-item-value">
-      <input
-        class="sdpi-item-value"
-        id="enabled"
-        type="checkbox"
-      />
-      <label for="enabled"></label>
+      <input id="enabled" type="checkbox" class="sdpi-item-value" />
+      <label for="enabled"><span></span>Sync other devices when this page appears</label>
+    </div>
+  </div>
+  <div class="sdpi-item">
+    <div class="sdpi-item-label"></div>
+    <div class="sdpi-item-value ds-muted">
+      The page index is this page's 0-based position in the profile. Put one anchor on every
+      page you want synced. This marker is on device <span id="thisDevice">…</span>.
     </div>
   </div>
 
-  <!-- Target device dropdown -->
-  <div class="sdpi-item" id="row-device">
-    <div class="sdpi-item-label">Sync device</div>
-    <select class="sdpi-item-value select" id="targetDeviceId">
-      <option value="">All other devices</option>
-    </select>
+  <div class="sdpi-heading">Deck Sync setup (all devices)</div>
+  <div class="ds-block ds-muted">
+    Give each device a scope and a role. A scope has one parent and one or more children;
+    the parent always wins. Pages map positionally (page N → page N) unless you add an override.
   </div>
-
-  <!-- Target profile name -->
-  <div class="sdpi-item" id="row-profile">
-    <div class="sdpi-item-label">Profile name</div>
-    <input
-      class="sdpi-item-value"
-      type="text"
-      id="targetProfile"
-      placeholder="e.g. Deck Sync – Original Page 1"
-    />
+  <div class="ds-block" id="setup"></div>
+  <div class="ds-block ds-row">
+    <button id="addScope" data-focus="addScope" disabled>Add scope</button>
+    <button id="save" disabled>Save</button>
+    <button id="discard">Discard changes</button>
   </div>
-
-  <details class="sdpi-item">
-    <summary>About profile names</summary>
-    <p style="padding: 8px; font-size: 12px; color: var(--sdpi-color-secondary)">
-      Enter the exact name of a profile bundled with this plugin (case-sensitive).
-      Profiles are visible in Stream Deck → Preferences → Profiles.
-    </p>
-  </details>
-
-  <!-- Scopes Management -->
-  <div class="sdpi-item" id="row-scopes">
-    <div class="sdpi-item-label">Scopes</div>
-    <div class="sdpi-item-value" id="scopes-container">
-      <div>Loading scopes...</div>
-    </div>
-  </div>
-
-  <!-- Roles Management -->
-  <div class="sdpi-item" id="row-roles">
-    <div class="sdpi-item-label">Roles</div>
-    <div class="sdpi-item-value" id="roles-container">
-      <div>Loading roles...</div>
-    </div>
-  </div>
-
-  <!-- Mappings Management -->
-  <div class="sdpi-item" id="row-mappings">
-    <div class="sdpi-item-label">Mappings</div>
-    <div class="sdpi-item-value" id="mappings-container">
-      <div>Loading mappings...</div>
-    </div>
-  </div>
+  <div class="ds-block ds-status" id="status" role="status" aria-live="polite"></div>
 
   <script>
-    const sdpiHandler = (() => {
-      let actionSettings = {};
-      let globalSettings = {};
-      let websocket = null;
+    (() => {
+      "use strict";
+
+      const $ = (id) => document.getElementById(id);
+      const clone = (v) => JSON.parse(JSON.stringify(v));
+
+      /* ---------------- state ---------------- */
+      let ws = null;
       let uuid = null;
+      let thisDeviceId = null;
+      let devices = [];                      // DeviceSummary[] from the plugin
+      let saved = { version: 2, scopes: [] }; // last settings confirmed by the plugin
+      let draft = clone(saved);               // what the user is editing
+      let dirty = false;                      // draft differs from saved
+      let saveSeq = 0;                        // ids for saves; the plugin echoes the id in its reply
+      let pendingSaveId = null;               // the Save whose reply confirms or rejects the draft (null: none)
+      let actionUuid = null;                  // this action's UUID, from actionInfo
+      let saveTimer = null;                   // "no reply" watchdog for Save
+      let loaded = false;                     // the first globalSettings reply has arrived
+      let devicesLoaded = false;              // the first devices reply has arrived
+      let loadAttempts = 0;                   // initial-load retries
+      let loadTimer = null;                   // "no reply" watchdog for the initial load
+      let pendingSave = null;                 // the scopes as sent by Save, to notice edits made meanwhile
+      let markerEdited = false;               // the marker fields were typed into; a late settings reply must not overwrite them
+      let lastValidPageIndex;                 // the page index last hydrated or saved (undefined = blank), kept while the box is invalid
+      let focusNext = null;                   // where the keyboard focus goes after the next re-render
+      let disconnected = false;               // the socket closed: the disconnect message stays until the panel is reopened
+      let saveTimedOut = false;               // the pending Save got no reply in time: edits and Discard behave as if nothing were pending
+      let rejected = false;                   // the last Save was rejected: its list of problems stays up while the user works through it
+      let rejectedText = "";                  // that list, to put back after a number box's own message
+      const invalidText = new Map();          // data-focus key → raw text of a number box flagged invalid, kept across re-renders
+      const collapsed = new Set();            // scope ids the user collapsed
+      const overrideIds = new WeakMap();      // override object → stable id, so a removed row's invalid text never lands on its successor
+      let overrideSeq = 0;
+      const overrideId = (o) => { if (!overrideIds.has(o)) overrideIds.set(o, ++overrideSeq); return overrideIds.get(o); };
 
-      function onOpen() {
-        const regEvent = {
-          event: "registerPropertyInspector",
-          uuid,
+      /* ---------------- Stream Deck plumbing ---------------- */
+
+      // Stream Deck calls this with the action's saved settings in actionInfo (PRD §8.3).
+      window.connectElgatoStreamDeckSocket = (port, piUuid, registerEvent, _info, actionInfoJson) => {
+        uuid = piUuid;
+        let actionInfo = {};
+        try { actionInfo = JSON.parse(actionInfoJson); } catch { /* leave empty */ }
+        thisDeviceId = actionInfo.device ?? null;
+        actionUuid = actionInfo.action ?? null;
+        hydrateMarker((actionInfo.payload && actionInfo.payload.settings) || {});
+        renderThisDevice();
+
+        ws = new WebSocket(`ws://127.0.0.1:${port}`);
+        ws.addEventListener("open", () => {
+          send({ event: registerEvent, uuid });
+          send({ event: "getSettings", context: uuid });
+          requestInitialState();
+        });
+        const onDisconnected = () => {
+          clearSaveTimeout();
+          if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+          pendingSaveId = null;
+          disconnected = true;
+          $("save").disabled = true;
+          $("addScope").disabled = true;
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
         };
-        websocket.send(JSON.stringify(regEvent));
+        ws.addEventListener("close", onDisconnected);
+        ws.addEventListener("error", onDisconnected);
+        ws.addEventListener("message", (e) => {
+          let msg;
+          try { msg = JSON.parse(e.data); } catch { return; }
+          if (msg.event === "didReceiveSettings") {
+            if (!markerEdited) hydrateMarker((msg.payload && msg.payload.settings) || {});
+          } else if (msg.event === "sendToPropertyInspector") {
+            onPluginMessage(msg.payload || {});
+          }
+        });
+      };
 
-        // Ask the plugin for connected devices.
-        sendToPlugin({ event: "getDevices" });
-        // Ask the plugin for global settings.
-        sendToPlugin({ event: "getGlobalSettings" });
+      /** Returns false when the socket is not open (the app restarted or the panel is stale). */
+      function send(obj) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+        ws.send(JSON.stringify(obj));
+        return true;
+      }
+      function toPlugin(payload) {
+        const msg = { event: "sendToPlugin", context: uuid, payload };
+        if (actionUuid) msg.action = actionUuid;
+        return send(msg);
+      }
+      function clearSaveTimeout() {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
       }
 
-      function onMessage(e) {
-        const data = JSON.parse(e.data);
+      // The first replies can be dropped if the plugin has not yet seen this panel appear;
+      // ask again (for whichever reply is missing) a few times before giving up. Save stays
+      // disabled until settings arrive.
+      function requestInitialState() {
+        if (loaded && devicesLoaded) return;
+        loadAttempts++;
+        if (!devicesLoaded) toPlugin({ event: "getDevices" });
+        if (!loaded) toPlugin({ event: "getGlobalSettings" });
+        if (loadTimer) clearTimeout(loadTimer);
+        loadTimer = setTimeout(() => {
+          loadTimer = null;
+          if (loaded && devicesLoaded) return;
+          if (loadAttempts < 3) {
+            if (!loaded) setStatus("Waiting for the plugin…", "");
+            requestInitialState();
+          } else if (!loaded) {
+            // The app only delivers a panel's messages while its key is showing on a connected device.
+            setStatus("The plugin did not receive this panel's messages — make sure the device is connected and this page is showing on it, then close and reopen the panel.", "err");
+          } else {
+            setStatus("The plugin did not send its device list — close and reopen this panel to see every device.", "err");
+          }
+        }, 3000);
+      }
+      function initialStateArrived() {
+        if (loaded && devicesLoaded && loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+      }
 
-        if (data.event === "didReceiveSettings") {
-          actionSettings = data.payload.settings ?? {};
-          applySettings();
+      function onPluginMessage(payload) {
+        switch (payload.event) {
+          case "devices": {
+            const next = Array.isArray(payload.devices) ? payload.devices : [];
+            const changed = JSON.stringify(next) !== JSON.stringify(devices);
+            devices = next;
+            devicesLoaded = true;
+            initialStateArrived();
+            renderThisDevice();
+            if (changed) renderSetup(); // the focused box keeps its text and validity mark across the re-render
+            break;
+          }
+          case "globalSettings": {
+            // A reply to a Save carries its id; one for a Save that a later Save replaced (or whose
+            // watchdog-era twin arrives late) is ignored. A reply without an id is a plain load.
+            const confirmed = payload.id !== undefined;
+            if (confirmed && payload.id !== pendingSaveId) {
+              saved = payload.settings || { version: 2, scopes: [] }; // an earlier Save's confirmation: what the plugin holds now; this Save's verdict is still to come
+              break;
+            }
+            // A load answered after a Save (a retry the plugin's read answered late) predates what the panel saved.
+            if (!confirmed && saveSeq > 0) break;
+            saved = payload.settings || { version: 2, scopes: [] };
+            let editedMeanwhile = false;
+            let applied = confirmed; // a confirmation always reports its problems; a plain load only when it was adopted
+            if (!loaded) {
+              // The first load is authoritative: nothing edited before it can be trusted.
+              loaded = true;
+              applied = true;
+              initialStateArrived();
+              $("save").disabled = false;
+              $("addScope").disabled = false;
+              draft = clone(saved);
+              dirty = false;
+              invalidText.clear();
+              renderSetup();
+              setStatus("", "");
+            } else if (confirmed) {
+              clearSaveTimeout();
+              pendingSaveId = null;
+              // Edits made while the plugin was saving stay in the draft, still unsaved. A Discard
+              // made meanwhile (dirty is false) adopts the confirmed configuration instead.
+              editedMeanwhile = (dirty && JSON.stringify(draft.scopes) !== pendingSave) || invalidText.size > 0; // (a value being typed, still invalid, is an edit too)
+              if (!editedMeanwhile) {
+                draft = clone(saved);
+                dirty = false;
+                invalidText.clear();
+                memberMemory.clear(); // what a device carried out of a scope before this save is not part of what was saved
+                overrideMemory.clear();
+                renderSetup();
+              }
+            } else if (!dirty && pendingSaveId === null) {
+              draft = clone(saved); // a reload while nothing is being edited or saved
+              memberMemory.clear();
+              overrideMemory.clear();
+              applied = true;
+              renderSetup();
+            }
+            if (applied && payload.issues && payload.issues.length) {
+              setStatus("Saved settings had problems; invalid scopes were ignored:\n" + issuesText(payload.issues), "err");
+            } else if (confirmed) {
+              setStatus(editedMeanwhile ? "Saved; you have further unsaved changes." : "Saved.", editedMeanwhile ? "" : "ok");
+            }
+            if (confirmed) pendingSave = null;
+            break;
+          }
+          case "globalSettingsRejected":
+            if (payload.id !== pendingSaveId) break; // not the Save awaiting a verdict
+            clearSaveTimeout();
+            pendingSaveId = null; // the draft stays dirty so the user can fix it
+            pendingSave = null;
+            rejected = dirty; // the list of problems is for the edits still in the draft: it stays while they are fixed
+            rejectedText = (dirty
+              ? "Not saved — fix these and try again:\n"
+              : "The save sent earlier was rejected; the panel shows the last saved configuration:\n") + issuesText(payload.issues || []);
+            setStatus(rejectedText, "err");
+            break;
         }
+      }
 
-        if (data.event === "sendToPlugin") {
-          const payload = data.payload;
-          if (payload.event === "devicesUpdate") {
-            populateDevices(payload.devices);
-          } else if (payload.event === "globalSettingsUpdate") {
-            globalSettings = payload.settings ?? {};
-            applySettings();
+      /* ---------------- this marker ---------------- */
+
+      function hydrateMarker(settings) {
+        const raw = settings.pageIndex;
+        const present = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "");
+        const n = Number(raw);
+        const valid = present && Number.isInteger(n) && n >= 0;
+        $("pageIndex").value = valid ? String(n) : "";
+        lastValidPageIndex = valid ? n : undefined;
+        $("enabled").checked = settings.enabled !== false;
+      }
+
+      /** Validates the page-index box; returns the parsed index (undefined when blank), or null when invalid. */
+      function readPageIndex() {
+        const input = $("pageIndex");
+        const raw = input.value.trim();
+        const n = Number(raw);
+        // A number box reports '' for text it cannot parse ("7e", "-", "1."): badInput, not blank.
+        const bad = !!(input.validity && input.validity.badInput);
+        const valid = !bad && (raw === "" || (Number.isInteger(n) && n >= 0));
+        input.setAttribute("aria-invalid", valid ? "false" : "true");
+        markerEdited = true;
+        return valid ? (raw === "" ? undefined : n) : null;
+      }
+
+      function saveMarker() {
+        const index = readPageIndex();
+        const valid = index !== null;
+        // An invalid page index is not saved, but the Enabled box still is (with the last valid index).
+        if (valid) lastValidPageIndex = index;
+        const payload = { enabled: $("enabled").checked };
+        if (lastValidPageIndex !== undefined) payload.pageIndex = lastValidPageIndex;
+        if (!send({ event: "setSettings", context: uuid, payload })) {
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
+          return;
+        }
+        if (!valid) setStatus("Page index must be a whole number, 0 or more. The page index was not saved; Enabled was.", "err");
+        else if ($("status").textContent.startsWith("Page index")) setStatus("", "");
+      }
+      // Typing validates as it goes; the index is saved once the edit is finished (change: blur or
+      // Enter), so "12" never reaches the plugin as "1" — the engine would take that for the page shown.
+      $("pageIndex").addEventListener("input", () => {
+        if (readPageIndex() === null) setStatus("Page index must be a whole number, 0 or more. It is saved once it is.", "err");
+        else if ($("status").textContent.startsWith("Page index")) setStatus("", "");
+      });
+      $("pageIndex").addEventListener("change", saveMarker);
+      $("enabled").addEventListener("change", saveMarker);
+      // If the panel is torn down mid-edit (another key selected on the canvas, the app closing) the
+      // finished-edit save may never fire: a valid index typed since the last save is flushed then.
+      function flushMarker() {
+        if (!markerEdited) return;
+        const index = readPageIndex();
+        if (index !== null && index !== lastValidPageIndex) saveMarker();
+      }
+      window.addEventListener("pagehide", flushMarker);
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") flushMarker(); });
+
+      function renderThisDevice() {
+        $("thisDevice").textContent = thisDeviceId ? deviceName(thisDeviceId) : "(unknown)";
+      }
+
+      /* ---------------- setup: helpers ---------------- */
+
+      function deviceName(id) {
+        const d = devices.find((x) => x.id === id);
+        if (!d) return `unknown device ${id}`;
+        const name = devices.some((x) => x !== d && x.name === d.name) ? `${d.name} (${id})` : d.name; // two of a kind
+        return d.isConnected ? name : `${name} (disconnected)`;
+      }
+
+      function defaultProfile(id) {
+        const d = devices.find((x) => x.id === id);
+        return d && d.defaultProfile ? d.defaultProfile : "";
+      }
+
+      /** Every device the UI should list: known to the app, or referenced by settings. */
+      function allDeviceIds() {
+        const ids = devices.map((d) => d.id);
+        for (const s of draft.scopes) for (const m of s.members) if (!ids.includes(m.deviceId)) ids.push(m.deviceId);
+        return ids;
+      }
+
+      function scopeOf(deviceId) {
+        return draft.scopes.find((s) => s.members.some((m) => m.deviceId === deviceId));
+      }
+
+      function memberOf(deviceId) {
+        const s = scopeOf(deviceId);
+        return s ? s.members.find((m) => m.deviceId === deviceId) : undefined;
+      }
+
+      function newScopeId() {
+        let n = draft.scopes.length + 1;
+        while (draft.scopes.some((s) => s.id === `scope-${n}`)) n++;
+        return `scope-${n}`;
+      }
+
+      function addScope() {
+        const id = newScopeId();
+        draft.scopes.push({ id, name: `Scope ${id.split("-")[1]}`, parentDeviceId: "", members: [], mapping: { mode: "positional", overrides: [] } });
+        return draft.scopes[draft.scopes.length - 1];
+      }
+
+      const memberMemory = new Map();   // deviceId → { profile, pageCount } of a member moved out of a scope: they describe the device and follow it into its next scope
+      const overrideMemory = new Map(); // deviceId → Map(scopeId → the pairs it had there): they belong to the scope and come back only if the device rejoins it
+                                        // (stepping through the scope list with the arrow keys must not throw them away)
+
+      function removeFromScope(deviceId) {
+        const s = scopeOf(deviceId);
+        if (!s) return;
+        const member = s.members.find((m) => m.deviceId === deviceId);
+        const names = (o) => o.a.deviceId === deviceId || o.b.deviceId === deviceId;
+        if (member) memberMemory.set(deviceId, { profile: member.profile, pageCount: member.pageCount });
+        const mine = s.mapping.overrides.filter(names);
+        if (mine.length) {
+          if (!overrideMemory.has(deviceId)) overrideMemory.set(deviceId, new Map());
+          overrideMemory.get(deviceId).set(s.id, mine);
+        }
+        s.members = s.members.filter((m) => m.deviceId !== deviceId);
+        s.mapping.overrides = s.mapping.overrides.filter((o) => !names(o));
+        syncParentId(s);
+      }
+
+      function assignToScope(deviceId, scope) {
+        removeFromScope(deviceId);
+        const hasParent = scope.members.some((m) => m.role === "parent");
+        // A profile and page count describe the device, not the scope: they follow it.
+        const kept = memberMemory.get(deviceId) || {};
+        const member = { deviceId, role: hasParent ? "child" : "parent" };
+        if (kept.profile) member.profile = kept.profile;
+        if (kept.pageCount !== undefined) member.pageCount = kept.pageCount;
+        scope.members.push(member);
+        syncParentId(scope);
+        const pairs = overrideMemory.get(deviceId) && overrideMemory.get(deviceId).get(scope.id);
+        if (pairs) {
+          // Back in a scope it left: its pairs return — those that still fit (the parent may have changed meanwhile)
+          // and do not pin a page that was pinned since.
+          overrideMemory.get(deviceId).delete(scope.id);
+          for (const o of pairs) {
+            const fits = o.a.deviceId === scope.parentDeviceId && scope.members.some((m) => m.deviceId === o.b.deviceId && m.role === "child");
+            const pinned = scope.mapping.overrides.some((x) => x.a.page === o.a.page || (x.b.deviceId === o.b.deviceId && x.b.page === o.b.page));
+            if (fits && !pinned) scope.mapping.overrides.push(o);
           }
         }
       }
 
-      function applySettings() {
-        document.getElementById("enabled").checked = actionSettings.enabled ?? true;
-        document.getElementById("targetDeviceId").value = actionSettings.targetDeviceId ?? "";
-        document.getElementById("targetProfile").value = actionSettings.targetProfile ?? "";
+      function setRole(deviceId, role) {
+        const s = scopeOf(deviceId);
+        if (!s) return;
+        if (role === "parent") for (const m of s.members) if (m.role === "parent") m.role = "child";
+        memberOf(deviceId).role = role;
+        syncParentId(s);
+      }
 
-        // Apply global settings if present
-        if (globalSettings.scopes) {
-          populateScopes(globalSettings.scopes);
+      function syncParentId(scope) {
+        const p = scope.members.find((m) => m.role === "parent");
+        scope.parentDeviceId = p ? p.deviceId : "";
+        // A pair is parent page ↔ child page whichever side it was built on: after a role swap the
+        // new parent may sit on the "b" side (the plugin accepts either; the panel shows "a" as the parent).
+        if (p) for (const o of scope.mapping.overrides) if (o.b.deviceId === p.deviceId && o.a.deviceId !== p.deviceId) { const a = o.a; o.a = o.b; o.b = a; }
+      }
+
+      /** Overrides that still pin a page of the current parent to a page of a current child. */
+      function validOverrides(scope) {
+        const p = scope.members.find((m) => m.role === "parent");
+        return scope.mapping.overrides.filter((o) =>
+          p && o.a.deviceId === p.deviceId && scope.members.some((m) => m.deviceId === o.b.deviceId && m.role === "child"));
+      }
+
+      function markDirty() {
+        dirty = true;
+        if (disconnected) return; // the disconnect message is the one that matters
+        if (rejected) return; // the problems the plugin reported stay up until the next Save or Discard
+        if (pendingSaveId === null || saveTimedOut) setStatus("Unsaved changes.", ""); // "Saving…" stays until the plugin answers
+      }
+
+      function change(fn) {
+        return (ev) => { fn(ev); markDirty(); renderSetup(); };
+      }
+
+      /* ---------------- setup: rendering (DOM only, no innerHTML with user text) ---------------- */
+
+      function el(tag, attrs, ...children) {
+        const node = document.createElement(tag);
+        for (const [k, v] of Object.entries(attrs || {})) {
+          if (k === "class") node.className = v;
+          else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+          else if (v !== undefined && v !== false) node.setAttribute(k, v === true ? "" : v);
         }
-        if (globalSettings.roles) {
-          populateRoles(globalSettings.roles);
-        }
-        if (globalSettings.mappings) {
-          populateMappings(globalSettings.mappings);
+        for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+        return node;
+      }
+
+      function option(value, label, selected) {
+        return el("option", { value, selected: !!selected }, label);
+      }
+
+      /**
+       * Marks a number box invalid (with a message) or valid; returns the parsed value or undefined.
+       * A blank is mid-edit, not invalid; with `blankPending` it is remembered too, so a re-render
+       * cannot quietly refill the box from the draft and let Save through with the old value.
+       */
+      function readNumber(input, min, message, blankPending) {
+        const raw = input.value.trim();
+        const n = Number(raw);
+        const bad = !!(input.validity && input.validity.badInput);
+        const ok = !bad && raw !== "" && Number.isInteger(n) && n >= min;
+        const invalid = !ok && !(raw === "" && !bad);
+        input.setAttribute("aria-invalid", invalid ? "true" : "false");
+        // An invalid value is not in the draft; remember its text so a re-render shows it again, still
+        // flagged (a browser reports text it cannot parse, like "7e", as a bad input with a blank value).
+        if (invalid) invalidText.set(input.dataset.focus, { text: bad ? input.value : raw, invalid: true });
+        else if (raw === "" && blankPending) invalidText.set(input.dataset.focus, { text: "", invalid: false });
+        else invalidText.delete(input.dataset.focus);
+        if (invalid) setStatus(message, "err");
+        else if ($("status").textContent === message) setStatus(rejected ? rejectedText : "", rejected ? "err" : ""); // fixed: the box's message gives way (markDirty says the rest)
+        return ok ? n : undefined;
+      }
+
+      function renderSetup() {
+        const root = $("setup");
+        for (const id of [...collapsed]) if (!draft.scopes.some((s) => s.id === id)) collapsed.delete(id); // a removed scope's id may be handed out again
+        // Re-rendering replaces every control; put the keyboard focus (and caret) back where it was.
+        const active = document.activeElement;
+        const focused = focusNext || (active && active.dataset ? active.dataset.focus : null);
+        const typing = !focusNext && focused && active.tagName === "INPUT"; // a device push mid-edit must not drop the text being typed
+        const caret = typing && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
+        const typed = typing ? { value: active.value, invalid: active.getAttribute("aria-invalid") } : null;
+        focusNext = null;
+        root.replaceChildren();
+        try {
+          renderSetupInto(root);
+          for (const [key, kept] of invalidText) {
+            const box = document.querySelector(`[data-focus="${CSS.escape(key)}"]`);
+            // A box that is gone or disabled (its device unassigned) cannot be fixed, so it must not block Save.
+            // A remembered blank is shown blank, unflagged until Save (which flags blank override boxes).
+            if (box && !box.disabled) { box.value = kept.text; if (kept.invalid) box.setAttribute("aria-invalid", "true"); } else invalidText.delete(key);
+          }
+        } finally {
+          if (focused) {
+            const found = document.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+            // A control that is gone or disabled (Add scope after a disconnect) cannot take the focus: the next one that can does.
+            const again = found && !found.disabled ? found : $("setup").querySelector("[data-focus]:not(:disabled)");
+            if (again) {
+              if (typed && again === found) { // (a fallback control is only focused: the text belongs to the box that is gone)
+                again.value = typed.value;
+                if (typed.invalid) again.setAttribute("aria-invalid", typed.invalid);
+              }
+              again.focus();
+              if (caret && typeof again.setSelectionRange === "function") {
+                try { again.setSelectionRange(caret[0], caret[1]); } catch { /* not a text control */ }
+              }
+            }
+          }
         }
       }
 
-      function populateScopes(scopes) {
-        const container = document.getElementById("scopes-container");
-        container.innerHTML = "";
-
-        if (scopes.length === 0) {
-          container.innerHTML = "<div>No scopes configured</div>";
+      function renderSetupInto(root) {
+        if (!loaded) {
+          root.append(el("div", { class: "ds-muted" }, "Loading the saved configuration…"));
+          return;
+        }
+        const ids = allDeviceIds();
+        if (!ids.length) {
+          root.append(el("div", { class: "ds-muted" }, "No Stream Deck devices known yet."));
+          for (const scope of draft.scopes) root.append(renderScope(scope));
           return;
         }
 
-        scopes.forEach((scope, index) => {
-          const scopeDiv = document.createElement("div");
-          scopeDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          scopeDiv.style.padding = "8px 0";
+        // Device table: device | scope | role | profile | pages
+        const table = el("table", { class: "ds-table" },
+          el("thead", {}, el("tr", {}, el("th", {}, "Device"), el("th", {}, "Scope"), el("th", {}, "Role"), el("th", {}, "Profile"), el("th", {}, "Pages"))));
+        const tbody = el("tbody");
+        for (const id of ids) {
+          const scope = scopeOf(id);
+          const member = memberOf(id);
+          const scopeSelect = el("select", { "aria-label": `Scope for ${deviceName(id)}`, "data-focus": `scope:${id}`, onchange: change((ev) => {
+            const v = ev.target.value;
+            const left = scopeOf(id);
+            removeFromScope(id);
+            // A scope this device just emptied has nothing left to say (stepping through the list
+            // with the arrow keys would otherwise leave one empty scope per pass).
+            if (left && left.members.length === 0) draft.scopes = draft.scopes.filter((s) => s !== left);
+            if (v === "__new") assignToScope(id, addScope());
+            else if (v !== "") assignToScope(id, draft.scopes.find((s) => s.id === v));
+          }) },
+            option("", "— not synced —", !scope),
+            ...draft.scopes.map((s) => option(s.id, s.name || s.id, scope && scope.id === s.id)),
+            option("__new", "New scope…", false));
+          const roleSelect = el("select", { "aria-label": `Role of ${deviceName(id)}`, "data-focus": `role:${id}`, disabled: !member, onchange: change((ev) => setRole(id, ev.target.value)) },
+            option("parent", "Parent", member && member.role === "parent"),
+            option("child", "Child", member && member.role === "child"));
+          const profileInput = el("input", {
+            type: "text", disabled: !member, "aria-label": `Profile for ${deviceName(id)}`, "data-focus": `profile:${id}`,
+            placeholder: defaultProfile(id) || (member ? "required for this device type" : ""),
+            value: member && member.profile ? member.profile : "",
+            oninput: (ev) => { if (member) { member.profile = ev.target.value.trim() || undefined; markDirty(); } },
+          });
+          const pagesInput = el("input", {
+            class: "ds-page", type: "number", min: "1", step: "1", disabled: !member, placeholder: "5", "aria-label": `Page count of ${deviceName(id)}`, "data-focus": `pages:${id}`,
+            value: member && member.pageCount ? String(member.pageCount) : "",
+            oninput: (ev) => {
+              if (!member) return;
+              const n = readNumber(ev.target, 1, "Pages must be a whole number, 1 or more.");
+              const blank = ev.target.value.trim() === "" && !(ev.target.validity && ev.target.validity.badInput);
+              if (n !== undefined) member.pageCount = n;
+              else if (blank) delete member.pageCount;
+              if (n !== undefined || blank) markDirty(); // an invalid value keeps its message on screen
+            },
+          });
+          tbody.append(el("tr", {}, el("td", {}, deviceName(id)), el("td", {}, scopeSelect), el("td", {}, roleSelect), el("td", {}, profileInput), el("td", {}, pagesInput)));
+        }
+        table.append(tbody);
+        root.append(table);
+        root.append(el("div", { class: "ds-muted" }, "Profile: a profile bundled with Deck Sync (e.g. profiles/original); blank uses the default for the device type. Pages: top-level pages in that profile (default 5)."));
 
-          scopeDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${scope.name}</strong> (${scope.deviceIds.length} devices)
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editScope(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteScope(${index})">Delete</button>
-              </div>
-            </div>
-          `;
-
-          container.appendChild(scopeDiv);
-        });
-
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Scope";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addScope;
-        container.appendChild(addButton);
+        // Scopes: name + overrides
+        for (const scope of draft.scopes) root.append(renderScope(scope));
       }
 
-      function populateRoles(roles) {
-        const container = document.getElementById("roles-container");
-        container.innerHTML = "";
+      function scopeSummary(scope) {
+        const parent = scope.members.find((m) => m.role === "parent");
+        const children = scope.members.filter((m) => m.role === "child");
+        return `${scope.name || scope.id}: ` +
+          (parent ? `parent ${deviceName(parent.deviceId)}` : "no parent") +
+          `, ${children.length} child${children.length === 1 ? "" : "ren"}` +
+          (scope.mapping.overrides.length ? `, ${scope.mapping.overrides.length} override(s)` : "");
+      }
 
-        if (roles.length === 0) {
-          container.innerHTML = "<div>No roles configured</div>";
+      /** A rename updates every label that carries the name in place; rebuilding the controls under the pointer would swallow the next click. */
+      function refreshScopeName(scope) {
+        const label = scope.name || scope.id;
+        const summary = document.querySelector(`[data-scope-summary="${CSS.escape(scope.id)}"]`);
+        if (summary) summary.textContent = scopeSummary(scope);
+        for (const option of document.querySelectorAll(`#setup select option[value="${CSS.escape(scope.id)}"]`)) option.textContent = label;
+        const remove = document.querySelector(`[data-focus="${CSS.escape(`rmscope:${scope.id}`)}"]`);
+        if (remove) remove.setAttribute("aria-label", `Remove scope ${label}`);
+        const add = document.querySelector(`[data-focus="${CSS.escape(`addov:${scope.id}`)}"]`);
+        if (add) add.setAttribute("aria-label", `Add override to ${label}`);
+      }
+
+      function renderScope(scope) {
+        const parent = scope.members.find((m) => m.role === "parent");
+        const children = scope.members.filter((m) => m.role === "child");
+        const summaryText = scopeSummary(scope);
+        const box = el("details", {
+          class: "ds-scope", open: !collapsed.has(scope.id),
+          ontoggle: (ev) => { if (ev.target.open) collapsed.delete(scope.id); else collapsed.add(scope.id); },
+        }, el("summary", { "data-scope-summary": scope.id, "data-focus": `summary:${scope.id}` }, summaryText));
+
+        box.append(el("div", { class: "ds-row" },
+          el("span", { class: "ds-fixed ds-muted" }, "Name"),
+          el("input", { type: "text", value: scope.name, "aria-label": `Name of ${scope.id}`, "data-focus": `name:${scope.id}`, oninput: (ev) => { scope.name = ev.target.value; markDirty(); refreshScopeName(scope); } }),
+          el("button", { class: "ds-fixed", "aria-label": `Remove scope ${scope.name || scope.id}`, "data-focus": `rmscope:${scope.id}`, onclick: change(() => { draft.scopes = draft.scopes.filter((s) => s !== scope); focusNext = "addScope"; }) }, "Remove scope")));
+
+        if (parent && children.length) {
+          box.append(el("div", { class: "ds-muted" }, "Overrides pin a parent page to a child page (both directions); other pages map positionally."));
+          const stale = scope.mapping.overrides.length - validOverrides(scope).length;
+          if (stale) box.append(el("div", { class: "ds-muted" }, `${stale} override(s) no longer involve the parent and will be dropped on Save (Discard changes restores them).`));
+          scope.mapping.overrides.forEach((o, i) => { if (validOverrides(scope).includes(o)) box.append(renderOverride(scope, parent, children, o, i)); });
+          box.append(el("div", { class: "ds-row" }, el("button", { class: "ds-fixed", "aria-label": `Add override to ${scope.name || scope.id}`, "data-focus": `addov:${scope.id}`, onclick: change(() => {
+            scope.mapping.overrides.push({ a: { deviceId: parent.deviceId, page: 0 }, b: { deviceId: children[0].deviceId, page: 0 } });
+          }) }, "Add override")));
+        } else {
+          box.append(el("div", { class: "ds-muted" }, "Assign at least a parent and one child to this scope."));
+        }
+        return box;
+      }
+
+      function renderOverride(scope, parent, children, o, index) {
+        const key = (part) => `ov:${scope.id}:${overrideId(o)}:${part}`;
+        const row = `override ${index + 1} of ${scope.id}`; // accessible names must tell the rows apart
+        const pageInput = (ref, label, part) => el("input", { class: "ds-fixed ds-page", type: "number", min: "0", step: "1", value: String(ref.page), "aria-label": `${label} (${row})`, "data-focus": key(part),
+          oninput: (ev) => {
+            // Mid-edit blanks keep the previous value; anything else invalid is flagged until fixed.
+            const n = readNumber(ev.target, 0, `${label} (${row}) must be a whole number, 0 or more.`, true);
+            if (n !== undefined) { ref.page = n; markDirty(); }
+          } });
+        return el("div", { class: "ds-row" },
+          el("span", { class: "ds-fixed ds-muted" }, "Parent page"), pageInput(o.a, "Parent page", "a"),
+          el("span", { class: "ds-fixed" }, "↔"),
+          el("select", { "aria-label": `Child device (${row})`, "data-focus": key("dev"), onchange: change((ev) => { o.b.deviceId = ev.target.value; }) },
+            ...children.map((m) => option(m.deviceId, deviceName(m.deviceId), m.deviceId === o.b.deviceId))),
+          el("span", { class: "ds-fixed ds-muted" }, "page"), pageInput(o.b, "Child page", "b"),
+          el("button", { class: "ds-fixed", "aria-label": `Remove ${row}`, "data-focus": key("rm"), onclick: change(() => { scope.mapping.overrides.splice(scope.mapping.overrides.indexOf(o), 1); focusNext = `addov:${scope.id}`; }) }, "×"));
+      }
+
+      /* ---------------- save / discard ---------------- */
+
+      $("addScope").addEventListener("click", change(() => { addScope(); }));
+      $("save").addEventListener("click", () => {
+        rejected = false; // whatever this attempt says replaces the last rejection's list
+        // An override page box left blank still holds its previous value in the draft; it must be filled in.
+        for (const input of $("setup").querySelectorAll('input[data-focus^="ov:"]')) {
+          if (input.value.trim() === "") input.setAttribute("aria-invalid", "true");
+        }
+        const bad = $("setup").querySelector('[aria-invalid="true"]');
+        if (bad) {
+          // The field may sit in a collapsed scope: open it, move the focus there and name it.
+          const section = bad.closest("details");
+          if (section && !section.open) {
+            section.open = true;
+            const summary = section.querySelector("[data-scope-summary]");
+            if (summary) collapsed.delete(summary.dataset.scopeSummary);
+          }
+          bad.focus();
+          setStatus(`Fix the highlighted fields first: ${bad.getAttribute("aria-label") || "a field"}.`, "err");
           return;
         }
-
-        roles.forEach((role, index) => {
-          const roleDiv = document.createElement("div");
-          roleDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          roleDiv.style.padding = "8px 0";
-
-          roleDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${role.name}</strong>
-                ${role.description ? `<br><small>${role.description}</small>` : ""}
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editRole(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteRole(${index})">Delete</button>
-              </div>
-            </div>
-          `;
-
-          container.appendChild(roleDiv);
+        // A scope nobody belongs to (Add scope, or every member removed) has nothing to save.
+        if (draft.scopes.some((s) => s.members.length === 0)) {
+          draft.scopes = draft.scopes.filter((s) => s.members.length > 0);
+          renderSetup();
+        }
+        // The payload is built from a copy: overrides are parent-relative and stay in the draft
+        // (so role changes round-trip), and the rendered rows keep pointing at the same objects.
+        const scopes = draft.scopes.map((s) => {
+          syncParentId(s);
+          return { ...s, mapping: { mode: "positional", overrides: validOverrides(s) } };
         });
-
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Role";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addRole;
-        container.appendChild(addButton);
-      }
-
-      function populateMappings(mappings) {
-        const container = document.getElementById("mappings-container");
-        container.innerHTML = "";
-
-        if (mappings.length === 0) {
-          container.innerHTML = "<div>No mappings configured</div>";
+        const id = ++saveSeq;
+        if (!toPlugin({ event: "setGlobalSettings", settings: { version: 2, scopes }, id })) {
+          setStatus("Disconnected from Stream Deck — close and reopen this panel.", "err");
           return;
         }
-
-        mappings.forEach((mapping, index) => {
-          const mappingDiv = document.createElement("div");
-          mappingDiv.style.borderBottom = "1px solid var(--sdpi-color-secondary)";
-          mappingDiv.style.padding = "8px 0";
-
-          mappingDiv.innerHTML = `
-            <div style="display: flex; justify-content: space-between; align-items: center;">
-              <div>
-                <strong>${mapping.sourceProfile}</strong> → <strong>${mapping.targetProfile}</strong>
-                <br><small>Scope: ${mapping.scopeId}</small>
-                ${mapping.enabled !== false ? "" : "<br><small style='color: red'>Disabled</small>"}
-              </div>
-              <div>
-                <button class="sdpi-item-value" onclick="editMapping(${index})">Edit</button>
-                <button class="sdpi-item-value" onclick="deleteMapping(${index})">Delete</button>
-              </div>
-            </div>
-          `;
-
-          container.appendChild(mappingDiv);
-        });
-
-        // Add button
-        const addButton = document.createElement("button");
-        addButton.textContent = "Add Mapping";
-        addButton.className = "sdpi-item-value";
-        addButton.onclick = addMapping;
-        container.appendChild(addButton);
-      }
-
-      function addScope() {
-        // For now, just alert - in a real implementation this would open a modal
-        alert("Add Scope functionality would be implemented here");
-      }
-
-      function editScope(index) {
-        alert("Edit Scope functionality would be implemented here");
-      }
-
-      function deleteScope(index) {
-        if (confirm("Are you sure you want to delete this scope?")) {
-          alert("Delete Scope functionality would be implemented here");
+        pendingSaveId = id;
+        pendingSave = JSON.stringify(draft.scopes);
+        saveTimedOut = false;
+        setStatus("Saving…", ""); // the draft stays dirty until the plugin confirms
+        clearSaveTimeout();
+        saveTimer = setTimeout(() => {
+          if (pendingSaveId !== id) return; // the reply, should it still come, is accepted all the same
+          saveTimedOut = true;
+          setStatus("No reply from the plugin — is it running? Try Save again.", "err");
+        }, 5000);
+      });
+      $("discard").addEventListener("click", () => {
+        draft = clone(saved);
+        dirty = false;
+        rejected = false;
+        invalidText.clear();
+        memberMemory.clear(); // a profile or page count typed and then discarded must not come back with the device
+        overrideMemory.clear();
+        const active = document.activeElement;
+        if (active && $("setup").contains(active)) active.blur(); // text being typed is discarded too, not carried across the re-render
+        if (pendingSaveId !== null && !saveTimedOut) {
+          // The save already went out and cannot be taken back; its confirmation is adopted as is.
+          pendingSave = null;
+          setStatus("Saving… (the save already sent cannot be discarded)", "");
+        } else {
+          pendingSave = null; // a timed-out save, should it still be confirmed, is adopted as is too
+          if (!disconnected) setStatus("", ""); // the disconnect message is the one that matters
         }
+        renderSetup();
+      });
+
+      function issuesText(issues) {
+        return issues.map((i) => "• " + (i.message || JSON.stringify(i))).join("\n");
       }
 
-      function addRole() {
-        alert("Add Role functionality would be implemented here");
+      function setStatus(text, kind) {
+        const s = $("status");
+        const className = "ds-block ds-status" + (kind ? " " + kind : "");
+        if (s.textContent === text && s.className === className) return; // a live region re-announces every write
+        s.textContent = text;
+        s.className = className;
       }
 
-      function editRole(index) {
-        alert("Edit Role functionality would be implemented here");
-      }
-
-      function deleteRole(index) {
-        if (confirm("Are you sure you want to delete this role?")) {
-          alert("Delete Role functionality would be implemented here");
-        }
-      }
-
-      function addMapping() {
-        alert("Add Mapping functionality would be implemented here");
-      }
-
-      function editMapping(index) {
-        alert("Edit Mapping functionality would be implemented here");
-      }
-
-      function deleteMapping(index) {
-        if (confirm("Are you sure you want to delete this mapping?")) {
-          alert("Delete Mapping functionality would be implemented here");
-        }
-      }
-
-      function saveSettings() {
-        actionSettings = {
-          enabled: document.getElementById("enabled").checked,
-          targetDeviceId: document.getElementById("targetDeviceId").value,
-          targetProfile: document.getElementById("targetProfile").value,
-        };
-
-        websocket.send(JSON.stringify({
-          event: "setSettings",
-          context: uuid,
-          payload: actionSettings,
-        }));
-      }
-
-      function sendToPlugin(payload) {
-        websocket.send(JSON.stringify({
-          event: "sendToPlugin",
-          context: uuid,
-          payload,
-        }));
-      }
-
-      function populateDevices(devices) {
-        const select = document.getElementById("targetDeviceId");
-        const current = actionSettings.targetDeviceId ?? "";
-
-        // Remove old device options (keep the "All other devices" default).
-        while (select.options.length > 1) select.remove(1);
-
-        for (const device of devices) {
-          const opt = document.createElement("option");
-          opt.value = device.id;
-          opt.textContent = device.name + (device.isConnected ? "" : " (disconnected)");
-          select.appendChild(opt);
-        }
-
-        select.value = current;
-      }
-
-      return {
-        connect(port, propertyInspectorUUID) {
-          uuid = propertyInspectorUUID;
-          websocket = new WebSocket(`ws://127.0.0.1:${port}`);
-          websocket.addEventListener("open", onOpen);
-          websocket.addEventListener("message", onMessage);
-
-          document.getElementById("enabled").addEventListener("change", saveSettings);
-          document.getElementById("targetDeviceId").addEventListener("change", saveSettings);
-          document.getElementById("targetProfile").addEventListener("input", saveSettings);
-        },
-      };
+      renderSetup();
     })();
-
-    // Stream Deck injects connectElgatoStreamDeckSocket into the page.
-    function connectElgatoStreamDeckSocket(port, uuid, _event, _info) {
-      sdpiHandler.connect(port, uuid);
-    }
   </script>
 </body>
 </html>

@@ -1,0 +1,248 @@
+/**
+ * PRD §7.2 AC [agent]: the global-settings shape validates and round-trips;
+ * scope/role validation rejects two parents, a device in two scopes, etc.
+ */
+import {
+  GLOBAL_SETTINGS_VERSION,
+  createDefaultGlobalSettings,
+  findScopeForDevice,
+  normalizeAnchorSettings,
+  validateGlobalSettings,
+  type GlobalSettings,
+  type Scope,
+} from "../settings";
+
+const desk: Scope = {
+  id: "desk",
+  name: "Desk",
+  parentDeviceId: "P",
+  members: [
+    { deviceId: "P", role: "parent", profile: "profiles/original" },
+    { deviceId: "C1", role: "child" },
+  ],
+  mapping: { mode: "positional", overrides: [{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 4 } }] },
+};
+
+const valid: GlobalSettings = { version: GLOBAL_SETTINGS_VERSION, scopes: [desk] };
+
+/** A deep copy with one scope field replaced. */
+const withScope = (patch: Record<string, unknown>) => ({
+  version: GLOBAL_SETTINGS_VERSION,
+  scopes: [{ ...JSON.parse(JSON.stringify(desk)), ...patch }],
+});
+
+/** The reason each rejected row must be rejected for (not just "ignored"). */
+const REJECTION_REASONS: Record<string, RegExp> = {
+  "two parents": /exactly one parent; found 2/,
+  "no parent": /exactly one parent; found 0/,
+  "no child": /at least one child/,
+  "parentDeviceId is not the parent member": /'parentDeviceId' \(C1\) is not the parent member \(P\)/,
+  "unknown role": /member P has role "boss"/,
+  "device listed twice": /device P is listed twice/,
+  "members not an array": /'members' must be an array/,
+  "unknown mapping mode": /unknown mapping mode "fancy"/,
+  "override endpoint not a member": /refers to X, which is not a member/,
+  "override negative page": /non-negative integer 'page'/,
+  "override fractional page": /non-negative integer 'page'/,
+  "override pairs a device with itself": /pairs device P with itself/,
+  "override between two children": /must pair a page of the parent \(P\)/,
+  "same parent page pinned twice for one child": /parent page 0 is already pinned for child C1/,
+  "same child page pinned twice": /child page 1 is already pinned for child C1/,
+  "override page beyond the member's page count": /page 3 of C1 is beyond its 3 pages/,
+  "override page beyond the default page count": /page 5 of P is beyond its 5 pages/,
+  "pageCount zero": /invalid 'pageCount' \(0\)/,
+  "pageCount fractional": /invalid 'pageCount' \(2\.5\)/,
+  "pageCount as a string": /invalid 'pageCount' \("5"\)/,
+};
+
+describe("validateGlobalSettings", () => {
+  test("fresh install (undefined / {}) yields defaults without issues", () => {
+    for (const input of [undefined, null, {}]) {
+      expect(validateGlobalSettings(input)).toEqual({ settings: createDefaultGlobalSettings(), issues: [], fatal: false });
+    }
+  });
+
+  test("valid settings round-trip unchanged through JSON", () => {
+    const result = validateGlobalSettings(JSON.parse(JSON.stringify(valid)));
+    expect(result.issues).toEqual([]);
+    expect(result.settings).toEqual(valid);
+  });
+
+  test("fills in defaults: name from id, mapping positional with no overrides", () => {
+    const { settings, issues } = validateGlobalSettings({
+      version: 2,
+      scopes: [{ id: "s", parentDeviceId: "P", members: [{ deviceId: "P", role: "parent" }, { deviceId: "C", role: "child" }] }],
+    });
+    expect(issues).toEqual([]);
+    expect(settings.scopes[0]).toEqual({
+      id: "s",
+      name: "s",
+      parentDeviceId: "P",
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C", role: "child" }],
+      mapping: { mode: "positional", overrides: [] },
+    });
+  });
+
+  test("a blank parentDeviceId is derived from the parent member", () => {
+    const result = validateGlobalSettings(withScope({ parentDeviceId: "" }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].parentDeviceId).toBe("P");
+  });
+
+  test("a demoted parent reports the missing parent, not the stale parentDeviceId", () => {
+    const result = validateGlobalSettings(withScope({ parentDeviceId: "", members: [{ deviceId: "P", role: "child" }, { deviceId: "C1", role: "child" }] }));
+    expect(result.issues[0].message).toBe("Scope 'desk' ignored: a scope needs exactly one parent; found 0.");
+  });
+
+  test("an override given child-first is normalized to parent-first", () => {
+    const result = validateGlobalSettings(withScope({ mapping: { overrides: [{ a: { deviceId: "C1", page: 4 }, b: { deviceId: "P", page: 2 } }] } }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].mapping.overrides).toEqual([{ a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 4 } }]);
+  });
+
+  test("the same parent page may be pinned for different children; pageCount is kept", () => {
+    const result = validateGlobalSettings(withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 8 }, { deviceId: "C2", role: "child" }],
+      mapping: { overrides: [
+        { a: { deviceId: "P", page: 2 }, b: { deviceId: "C1", page: 7 } },
+        { a: { deviceId: "P", page: 2 }, b: { deviceId: "C2", page: 3 } },
+      ] },
+    }));
+    expect(result.issues).toEqual([]);
+    expect(result.settings.scopes[0].members[1]).toEqual({ deviceId: "C1", role: "child", pageCount: 8 });
+    expect(result.settings.scopes[0].mapping.overrides).toHaveLength(2);
+  });
+
+  test("strips unknown fields and blank profiles", () => {
+    const { settings } = validateGlobalSettings({
+      version: 2,
+      extra: true,
+      scopes: [{ ...desk, junk: 1, members: [{ deviceId: "P", role: "parent", profile: "  " }, { deviceId: "C1", role: "child", foo: "bar" }] }],
+    });
+    expect(settings).toEqual({ version: 2, scopes: [{ ...desk, members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }] }] });
+  });
+
+  test.each([
+    ["not an object", "nope"],
+    ["wrong version", { version: 1, scopes: [] }],
+    ["legacy v1 shape", { version: "1.0.0", scopes: [{ id: "all", name: "All", deviceIds: [] }], roles: [], mappings: [] }],
+    ["scopes not an array", { version: 2, scopes: {} }],
+  ])("%s → defaults plus a fatal issue, never a throw", (_, input) => {
+    const result = validateGlobalSettings(input);
+    expect(result.settings).toEqual(createDefaultGlobalSettings());
+    expect(result.issues).toHaveLength(1);
+    expect(result.fatal).toBe(true);
+  });
+
+  test.each([
+    ["two parents", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "parent" }] })],
+    ["no parent", withScope({ members: [{ deviceId: "P", role: "child" }, { deviceId: "C1", role: "child" }] })],
+    ["no child", withScope({ members: [{ deviceId: "P", role: "parent" }] })],
+    ["parentDeviceId is not the parent member", withScope({ parentDeviceId: "C1" })],
+    ["unknown role", withScope({ members: [{ deviceId: "P", role: "boss" }, { deviceId: "C1", role: "child" }] })],
+    ["device listed twice", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "P", role: "child" }] })],
+    ["members not an array", withScope({ members: "P,C1" })],
+    ["unknown mapping mode", withScope({ mapping: { mode: "fancy", overrides: [] } })],
+    ["override endpoint not a member", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "X", page: 0 } }] } })],
+    ["override negative page", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: -1 }, b: { deviceId: "C1", page: 0 } }] } })],
+    ["override fractional page", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 1.5 }, b: { deviceId: "C1", page: 0 } }] } })],
+    ["override pairs a device with itself", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "P", page: 1 } }] } })],
+    ["override between two children", withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child" }, { deviceId: "C2", role: "child" }],
+      mapping: { overrides: [{ a: { deviceId: "C1", page: 0 }, b: { deviceId: "C2", page: 1 } }] },
+    })],
+    ["same parent page pinned twice for one child", withScope({ mapping: { overrides: [
+      { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 1 } },
+      { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 2 } },
+    ] } })],
+    ["same child page pinned twice", withScope({ mapping: { overrides: [
+      { a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 1 } },
+      { a: { deviceId: "P", page: 3 }, b: { deviceId: "C1", page: 1 } },
+    ] } })],
+    ["override page beyond the member's page count", withScope({
+      members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 3 }],
+      mapping: { overrides: [{ a: { deviceId: "P", page: 0 }, b: { deviceId: "C1", page: 3 } }] },
+    })],
+    ["override page beyond the default page count", withScope({ mapping: { overrides: [{ a: { deviceId: "P", page: 5 }, b: { deviceId: "C1", page: 0 } }] } })],
+    ["pageCount zero", withScope({ members: [{ deviceId: "P", role: "parent", pageCount: 0 }, { deviceId: "C1", role: "child" }] })],
+    ["pageCount fractional", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: 2.5 }] })],
+    ["pageCount as a string", withScope({ members: [{ deviceId: "P", role: "parent" }, { deviceId: "C1", role: "child", pageCount: "5" }] })],
+  ])("drops a scope with %s and reports it", (name, input) => {
+    const result = validateGlobalSettings(input);
+    expect(result.settings.scopes).toEqual([]);
+    expect(result.issues).toHaveLength(1);
+    expect(result.issues[0].message).toMatch(/^Scope 'desk' ignored:/);
+    expect(result.issues[0].message).toMatch(REJECTION_REASONS[name]);
+    expect(result.issues[0].scopeId).toBe("desk");
+    expect(result.fatal).toBe(false);
+  });
+
+  test.each([
+    ["a member that is not an object", withScope({ members: [null, { deviceId: "C1", role: "child" }] }), /member 0 has no 'deviceId'/],
+    ["a non-string profile", withScope({ members: [{ deviceId: "P", role: "parent", profile: 5 }, { deviceId: "C1", role: "child" }] }), /non-string 'profile'/],
+    ["mapping that is not an object", withScope({ mapping: "x" }), /'mapping' must be an object/],
+    ["overrides that are not an array", withScope({ mapping: { overrides: {} } }), /'mapping.overrides' must be an array/],
+    ["an override that is not an object", withScope({ mapping: { overrides: [null] } }), /override 0 is not an object/],
+    ["an override side without a page", withScope({ mapping: { overrides: [{ a: { deviceId: "P" }, b: { deviceId: "C1", page: 1 } }] } }), /override 0\.a needs a 'deviceId' and a non-negative integer 'page'/],
+  ])("rejects a scope with %s", (_, input, reason) => {
+    const result = validateGlobalSettings(input);
+    expect(result.settings.scopes).toEqual([]);
+    expect(result.issues[0].message).toMatch(reason);
+  });
+
+  test("a scope that is not an object is reported by index; a mapping without overrides defaults to none", () => {
+    const result = validateGlobalSettings({ version: 2, scopes: [null, "x", { ...desk, mapping: { mode: "positional" } }] });
+    expect(result.issues.map((i) => i.message)).toEqual(["Scope at index 0 ignored: not an object.", "Scope at index 1 ignored: not an object."]);
+    expect(result.settings.scopes).toEqual([{ ...desk, mapping: { mode: "positional", overrides: [] } }]);
+  });
+
+  test("a scope without an id is reported by index", () => {
+    const result = validateGlobalSettings(withScope({ id: "" }));
+    expect(result.settings.scopes).toEqual([]);
+    expect(result.issues).toEqual([{ scopeId: undefined, message: "Scope at index 0 ignored: missing 'id'." }]);
+  });
+
+  test("a device may belong to one scope only: the later scope is dropped, the first kept", () => {
+    const second: Scope = { ...desk, id: "other", name: "Other", parentDeviceId: "P2", members: [{ deviceId: "P2", role: "parent" }, { deviceId: "C1", role: "child" }], mapping: { mode: "positional", overrides: [] } };
+    const result = validateGlobalSettings({ version: 2, scopes: [desk, second] });
+    expect(result.settings.scopes.map((s) => s.id)).toEqual(["desk"]);
+    expect(result.issues).toEqual([{ scopeId: "other", message: expect.stringContaining("device C1 already belongs to scope 'desk'") }]);
+  });
+
+  test("duplicate scope ids: later definition ignored", () => {
+    const result = validateGlobalSettings({ version: 2, scopes: [desk, { ...desk, members: [{ deviceId: "P3", role: "parent" }, { deviceId: "C3", role: "child" }], parentDeviceId: "P3", mapping: undefined }] });
+    expect(result.settings.scopes).toHaveLength(1);
+    expect(result.issues[0].message).toContain("defined more than once");
+  });
+
+  test("keeps valid scopes when another is invalid", () => {
+    const bad = { id: "bad", parentDeviceId: "Q", members: [{ deviceId: "Q", role: "child" }] };
+    const result = validateGlobalSettings({ version: 2, scopes: [bad, desk] });
+    expect(result.settings.scopes.map((s) => s.id)).toEqual(["desk"]);
+    expect(result.issues.map((i) => i.scopeId)).toEqual(["bad"]);
+  });
+});
+
+describe("findScopeForDevice", () => {
+  test("finds the scope containing a member, or undefined", () => {
+    expect(findScopeForDevice(valid, "C1")?.id).toBe("desk");
+    expect(findScopeForDevice(valid, "nobody")).toBeUndefined();
+  });
+});
+
+describe("normalizeAnchorSettings", () => {
+  test.each([
+    [{}, { pageIndex: undefined, enabled: true }],
+    [undefined, { pageIndex: undefined, enabled: true }],
+    [{ pageIndex: 3 }, { pageIndex: 3, enabled: true }],
+    [{ pageIndex: "4", enabled: true }, { pageIndex: 4, enabled: true }],
+    [{ pageIndex: "" }, { pageIndex: undefined, enabled: true }],
+    [{ pageIndex: -1 }, { pageIndex: undefined, enabled: true }],
+    [{ pageIndex: 1.5 }, { pageIndex: undefined, enabled: true }],
+    [{ pageIndex: 0, enabled: false }, { pageIndex: 0, enabled: false }],
+    [{ enabled: "no" }, { pageIndex: undefined, enabled: true }],
+    [{ targetDeviceId: "legacy", targetProfile: "Default" }, { pageIndex: undefined, enabled: true }],
+  ])("%j → %j", (input, expected) => {
+    expect(normalizeAnchorSettings(input)).toEqual(expected);
+  });
+});

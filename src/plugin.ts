@@ -1,52 +1,80 @@
 import streamDeck from "@elgato/streamdeck";
 import { PageAnchorAction } from "./actions/page-anchor";
-import { createDefaultGlobalSettings, validateGlobalSettings } from "./globalSettings";
+import { describeError } from "./log";
+import { createGlobalSettingsHandler, loadGlobalSettings, registerPropertyInspectorBridge } from "./piBridge";
+import { createDefaultGlobalSettings, type GlobalSettings } from "./settings";
+import { SyncEngine, type DeviceInfo } from "./syncEngine";
+
+const log = streamDeck.logger.createScope("DeckSync");
+
+const toInfo = (d: { id: string; name: string; type: number; isConnected: boolean }): DeviceInfo => ({
+  id: d.id,
+  name: d.name,
+  type: d.type,
+  isConnected: d.isConnected,
+});
+
+// The engine sees the SDK only through these adapters (src/syncEngine.ts).
+const engine = new SyncEngine({
+  switcher: { switchToProfile: (deviceId, profile, page) => streamDeck.profiles.switchToProfile(deviceId, profile, page) },
+  clock: { now: () => Date.now() },
+  log: streamDeck.logger.createScope("sync"),
+  devices: {
+    list: () => [...streamDeck.devices].map(toInfo),
+    get: (id) => {
+      const d = streamDeck.devices.getDeviceById(id);
+      return d && toInfo(d);
+    },
+  },
+});
 
 // Register all actions before connecting.
-streamDeck.actions.registerAction(new PageAnchorAction());
+streamDeck.actions.registerAction(new PageAnchorAction(engine));
 
-streamDeck.connect();
+// The SDK hands over `undefined` for a device id it has never seen; the event is then nothing to act on.
+streamDeck.devices.onDeviceDidConnect((ev) => { if (ev.device) engine.onDeviceConnected(ev.device.id); else log.debug("Devices: connect event for a device the SDK does not know; ignored"); });
+streamDeck.devices.onDeviceDidDisconnect((ev) => { if (ev.device) engine.onDeviceDisconnected(ev.device.id); else log.debug("Devices: disconnect event for a device the SDK does not know; ignored"); });
 
-// Handle global settings requests from the Property Inspector
-streamDeck.settings.onDidReceiveGlobalSettings((ev) => {
-  // Forward global settings updates to the property inspector
-  streamDeck.ui.sendToPropertyInspector({
-    event: "globalSettingsUpdate",
-    settings: JSON.parse(JSON.stringify(ev.settings)),
-  } as any);
+// Settings reach the engine validated: from the PI's save, or from the global-settings event.
+// Until start() has finished (settings applied, pre-start navigation replayed) the event is
+// ignored and a save from the PI is held, so neither can interleave with the start-up load.
+let started = false;
+let saves = 0; // once the panel has saved, a read answered late is stale and must not revert the engine
+let savedBeforeStart: GlobalSettings | undefined;
+const handleGlobalSettings = createGlobalSettingsHandler(log, engine, () => started, () => saves > 0);
+streamDeck.settings.onDidReceiveGlobalSettings((ev) => handleGlobalSettings(ev.settings));
+registerPropertyInspectorBridge({
+  log,
+  onSettingsSaved: (settings) => {
+    saves++;
+    if (started) engine.onSettingsChanged(settings);
+    else savedBeforeStart = settings;
+  },
 });
 
-// Handle getGlobalSettings requests from the Property Inspector
-streamDeck.ui.onSendToPlugin((ev) => {
-  const payload = ev.payload as any;
-  if (payload && typeof payload === "object" && "event" in payload) {
-    if (payload.event === "getGlobalSettings") {
-      (async () => {
-        let settings: any;
-        try {
-          const json = await streamDeck.settings.getGlobalSettings();
-          settings = validateGlobalSettings(json);
-        } catch (error) {
-          // If there's an error (e.g., no settings yet), use default
-          settings = createDefaultGlobalSettings();
-        }
-        streamDeck.ui.sendToPropertyInspector({ event: "globalSettingsUpdate", settings } as any);
-      })();
-    } else if (payload.event === "setGlobalSettings") {
-      (async () => {
-        try {
-          // Validate by validating
-          validateGlobalSettings(payload);
-          // If valid, save
-          await streamDeck.settings.setGlobalSettings(payload);
-          // Then get the updated settings and send back to PI to confirm
-          const json = await streamDeck.settings.getGlobalSettings();
-          const settings = validateGlobalSettings(json);
-          streamDeck.ui.sendToPropertyInspector({ event: "globalSettingsUpdate", settings } as any);
-        } catch (error) {
-          streamDeck.ui.sendToPropertyInspector({ event: "globalSettingsError", error: (error as Error).message } as any);
-        }
-      })();
+/** The SDK's global-settings read has no timeout of its own; never let a lost reply keep the engine from starting. */
+const SETTINGS_LOAD_TIMEOUT_MS = 15_000;
+
+streamDeck
+  .connect()
+  .then(async () => {
+    // Devices are known only after connecting; start never issues a switch.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), SETTINGS_LOAD_TIMEOUT_MS); });
+    const load = loadGlobalSettings(log);
+    const loaded = await Promise.race([load.then((r) => r.settings), timeout]);
+    clearTimeout(timer);
+    if (!loaded) log.warn(`Settings: no reply from Stream Deck within ${SETTINGS_LOAD_TIMEOUT_MS}ms; starting with defaults — they are applied when the reply arrives, or reopen a Page Anchor's Property Inspector to reload them.`);
+    await engine.start(savedBeforeStart ?? loaded ?? createDefaultGlobalSettings());
+    started = true;
+    if (savedBeforeStart) engine.onSettingsChanged(savedBeforeStart); // a no-op unless it arrived during start()
+    // A late reply that lands while start() is still replaying is ignored by the event handler; apply it here
+    // (a no-op if the event already did) — unless the panel has saved meanwhile, in which case it is stale.
+    if (!loaded) {
+      void load.then((r) => {
+        if (saves === 0) engine.onSettingsChanged(r.settings);
+        else log.debug("Settings: the late reply is ignored; the configuration saved from the panel is already applied");
+      });
     }
-  }
-});
+  })
+  .catch((err: unknown) => log.error(`Startup failed: ${describeError(err)}`));

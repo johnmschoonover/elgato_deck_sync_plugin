@@ -9,7 +9,7 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 
 | Item | Rule |
 |---|---|
-| One profile per device type | Original/MK.2, XL, Mini, Neo (PRD §7.4). The Stream Deck + is not in that list although PRD §6.6 uses one as the parent (PRD §8.6): if an SD+ will be a scope member, export `profiles/plus` too, register it under `DeviceType 7` and make the three-place code change below. Any other device type (Studio, Plus XL, …) has no default: set its *Profile* in the configuration UI. |
+| One profile per device type | Original/MK.2, XL, Mini, Neo and + (PRD §7.4). **Exported so far (2026-10-14, on John's hardware): `profiles/original` and `profiles/plus`.** Mini, XL and Neo keep their default names in `src/profiles.ts` but are not registered in the manifest until a device of that type is available to export from (the registration test allows exactly that). Any other device type (Studio, Plus XL, …) has no default: set its *Profile* in the configuration UI. |
 | Page count | **5** top-level pages (PRD §10 OQ-2). |
 | Marker placement | **Exactly one Page Anchor per page**, on the top-left key (column 0, row 0). Several anchors with the *same* page index on one page count as one navigation and merely waste keys; anchors with *different* indices on one page each send (manual check C-15) and, copied onto two decks, can trip the conflicting-anchor breaker. |
 | Anchor settings | `{ "pageIndex": N, "enabled": true }` where `N` is the **0-based** index of the page the anchor sits on. The Property Inspector sets these. |
@@ -23,7 +23,7 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 | Stream Deck Mini (6 keys) | 1 | `profiles/mini.streamDeckProfile` | `profiles/mini` |
 | Stream Deck XL (32 keys) | 2 | `profiles/xl.streamDeckProfile` | `profiles/xl` |
 | Stream Deck Neo (8 keys) | 9 | `profiles/neo.streamDeckProfile` | `profiles/neo` |
-| Stream Deck + (optional) | 7 | `profiles/plus.streamDeckProfile` | `profiles/plus` |
+| Stream Deck + | 7 | `profiles/plus.streamDeckProfile` | `profiles/plus` |
 | Stream Deck Studio (no default) | 10 | — | set *Profile* by hand, or add a row to `DEFAULT_PROFILE_BY_DEVICE_TYPE` in `src/profiles.ts` and pin it in `src/tests/profiles.test.ts` |
 | Stream Deck + XL (no default) | 13 | — | as above |
 
@@ -31,13 +31,12 @@ for exporting them from the Stream Deck app; it cannot be done headless.
 has pages to sync.) The engine resolves a scope member's profile from its `profile` setting,
 or, when that is blank, from the device type using the `Name`s above (see `src/profiles.ts`).
 Any other device type must have `profile` set explicitly in the configuration UI. **Every profile
-registered in `manifest.json → Profiles` must also appear in `DEFAULT_PROFILE_BY_DEVICE_TYPE`**
-(`src/tests/profiles.test.ts` enforces it). Bundling `profiles/plus` is therefore a
-three-place change, or `npm test` goes red: add `7: "profiles/plus"` to the table in
-`src/profiles.ts`, extend the key pin in `src/tests/profiles.test.ts` from `[0, 1, 2, 9]` to
-`[0, 1, 2, 7, 9]`, and add the Stream Deck + to the device list in PRD §7.4. "Set its
-*Profile* manually" is only for a profile that is *not* bundled under its device type's
-default name.
+registered in `manifest.json → Profiles` must appear in `DEFAULT_PROFILE_BY_DEVICE_TYPE`, and a
+default is registered exactly when its `.streamDeckProfile` exists on disk**
+(`src/tests/profiles.test.ts` enforces both). Landing a new export is therefore a two-place
+change: copy the file into `profiles/` and add its manifest entry. A new device *type* also
+needs a row in the table and the key pin in the test. "Set its *Profile* manually" is only for
+a profile that is *not* bundled under its device type's default name.
 
 ## Procedure (Stream Deck app, plugin installed and loading — after gate A3)
 
@@ -56,11 +55,11 @@ default name.
    ```json
    "Profiles": [
      { "DeviceType": 0, "Name": "profiles/original" },
-     { "DeviceType": 1, "Name": "profiles/mini" },
-     { "DeviceType": 2, "Name": "profiles/xl" },
-     { "DeviceType": 9, "Name": "profiles/neo" }
+     { "DeviceType": 7, "Name": "profiles/plus" }
    ]
    ```
+
+   (Mini `1`, XL `2` and Neo `9` join the list when their exports exist.)
 
    `AutoInstall` defaults to `true` (offered on install, PRD §7.4; the schema says the field
    needs app 6.6+, below our 7.1 floor); leave `Readonly` unset so

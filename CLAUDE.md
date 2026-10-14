@@ -47,7 +47,7 @@ Deck Sync is an Elgato Stream Deck plugin that syncs page navigation across mult
     ├── manifest.json
     ├── imgs/                                # placeholder icons (final art: Epic E4)
     ├── ui/anchor.html                       # marker settings + Deck Sync setup (global config) UI
-    ├── profiles/                            # NOT PRESENT YET — created when D1's exported profiles land (docs/PROFILES.md)
+    ├── profiles/                            # exported bundled profiles: original + plus so far (docs/PROFILES.md)
     ├── logs/                                # plugin log files at runtime (gitignored)
     └── bin/                                 # build output (gitignored)
 ```
@@ -71,9 +71,9 @@ CI runs the same four commands on every push/PR to `main`. Run them all before p
 
 ## Known issues / current state (October 2026)
 
-Build, typecheck, validate and tests are green; every [agent] item in Epics A–C and E1–E3 is implemented (details in PRD §8). D2 (manifest `Profiles` wiring) waits on D1's exported files. Open items:
+Build, typecheck, validate and tests are green; every [agent] item in Epics A–C and E1–E3 is implemented (details in PRD §8). D1/D2 are done for the Original and the Stream Deck + (exported 2026-10-14). Open items:
 
-1. **No bundled profiles (D1, [gate]).** There is no `profiles/` directory; sync cannot be exercised on hardware until John exports real profiles per `docs/PROFILES.md`. The engine's default profile names match that document.
+1. **Mini, XL and Neo profiles not exported (D1, [gate]).** Only `profiles/original` and `profiles/plus` exist; the other three need a device of that type to export from (`docs/PROFILES.md`).
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
 3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor and driven-send (`overturned-switches`) breakers, carrier promotion, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached, left-page — PRD §8.6 "never forgotten"), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
 4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).

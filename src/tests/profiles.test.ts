@@ -22,9 +22,12 @@ describe("bundled profiles", () => {
   });
 
   if (bundled.length) {
-    test("D2: every default profile name is registered in manifest Profiles", () => {
+    // A default is registered exactly when its export exists; an unexported one (docs/PROFILES.md) stays off the manifest.
+    test("D2: every default profile with an export on disk is registered in manifest Profiles, and only those", () => {
       for (const [type, name] of Object.entries(DEFAULT_PROFILE_BY_DEVICE_TYPE)) {
-        expect(bundled).toContainEqual(expect.objectContaining({ DeviceType: Number(type), Name: name }));
+        const exported = existsSync(join(PLUGIN_DIR, `${name}.streamDeckProfile`));
+        const registered = bundled.some((p) => p.DeviceType === Number(type) && p.Name === name);
+        expect({ name, registered }).toEqual({ name, registered: exported });
       }
     });
   } else {
@@ -35,8 +38,8 @@ describe("bundled profiles", () => {
     for (const name of Object.values(DEFAULT_PROFILE_BY_DEVICE_TYPE)) expect(name).toMatch(/^profiles\/[a-z]+$/);
   });
 
-  test("PRD §7.4: defaults exist for exactly the Original/MK.2, Mini, XL and Neo device types", () => {
-    expect(Object.keys(DEFAULT_PROFILE_BY_DEVICE_TYPE).map(Number).sort((a, b) => a - b)).toEqual([0, 1, 2, 9]);
+  test("PRD §7.4: defaults exist for exactly the Original/MK.2, Mini, XL, + and Neo device types", () => {
+    expect(Object.keys(DEFAULT_PROFILE_BY_DEVICE_TYPE).map(Number).sort((a, b) => a - b)).toEqual([0, 1, 2, 7, 9]);
   });
 });
 
@@ -46,7 +49,7 @@ describe("resolveProfile", () => {
     ["explicit profile is trimmed", "  profiles/custom ", 1, "profiles/custom"],
     ["blank explicit falls back to the device type", "  ", 1, "profiles/mini"],
     ["undefined explicit falls back to the device type", undefined, 0, "profiles/original"],
-    ["unknown device type has no default", undefined, 7, undefined],
+    ["unknown device type has no default", undefined, 10, undefined],
     ["unknown device", undefined, undefined, undefined],
   ])("%s", (_, explicit, type, expected) => {
     expect(resolveProfile(explicit, type)).toBe(expected);

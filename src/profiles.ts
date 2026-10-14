@@ -9,6 +9,7 @@ export const DEFAULT_PROFILE_BY_DEVICE_TYPE: Readonly<Record<number, string>> = 
   0: "profiles/original", // Stream Deck (Original / MK.2)
   1: "profiles/mini", // Stream Deck Mini
   2: "profiles/xl", // Stream Deck XL
+  7: "profiles/plus", // Stream Deck +
   9: "profiles/neo", // Stream Deck Neo
 };
 

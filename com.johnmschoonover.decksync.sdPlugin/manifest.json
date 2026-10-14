@@ -46,5 +46,15 @@
       "SupportedInMultiActions": false
     }
   ],
+  "Profiles": [
+    {
+      "DeviceType": 0,
+      "Name": "profiles/original"
+    },
+    {
+      "DeviceType": 7,
+      "Name": "profiles/plus"
+    }
+  ],
   "URL": "https://github.com/johnmschoonover/elgato_deck_sync_plugin"
 }

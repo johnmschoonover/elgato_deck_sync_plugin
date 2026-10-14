@@ -5,7 +5,7 @@ const mockState = {
   listeners: {} as { sendToPlugin?: (ev: unknown) => Promise<void>; connect?: () => void; disconnect?: () => void },
   devices: [
     { id: "P", name: "Deck P", type: 0, isConnected: true },
-    { id: "C1", name: "Deck C1", type: 7, isConnected: false },
+    { id: "C1", name: "Deck C1", type: 10, isConnected: false },
   ],
   getFails: false,
   setFails: false,
@@ -49,7 +49,7 @@ const validSettings = {
 /** What the PI must receive for the mocked devices (spelled out, not computed by the code under test). */
 const DEVICE_LIST = [
   { id: "P", name: "Deck P", type: 0, isConnected: true, defaultProfile: "profiles/original" },
-  { id: "C1", name: "Deck C1", type: 7, isConnected: false },
+  { id: "C1", name: "Deck C1", type: 10, isConnected: false },
 ];
 
 beforeEach(() => {

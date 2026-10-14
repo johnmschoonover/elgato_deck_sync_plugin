@@ -81,6 +81,6 @@ See `docs/SPIKE1.md` for the procedure and the result slot.
 
 | Date | Machine / OS | Devices (P / C) | Stream Deck version | A3 | B | C-1…C-17 | D3 | Spike-1 | Icons | Notes |
 |---|---|---|---|---|---|---|---|---|---|---|
-| | | | | | | | | | | |
+| 2026-10-14 | MacBook Pro, macOS 26.6.2 | Stream Deck + / Stream Deck (MK.2) | 7.4.2 (22730) | pass | pass | C-1 pass; C-2…C-17 pending | not run | not run | app only | Linked dev build, plugin ran under the app's Node 24.13.1. Driven by Claude through the Stream Deck app (page flips = canvas page buttons, state read from the canvas and the log; no eyes on the physical decks). B: the PI loads **unstyled** — `cdn.elgato.com` does not resolve, so `sdpi.css` (anchor.html line 7) never arrives (devtools: `ERR_NAME_NOT_RESOLVED`); everything still works, Tab reaches the *Enabled* box, no stray `ANCHOR updated` on open, hydration ok, rejection text exact, scope survived relaunch. The scope and role dropdowns were set by dispatching `change` on the selects from the PI's devtools console (the automation layer cannot operate Qt pop-up menus); Save/Discard were clicked the same way after the AX press on the web buttons proved inert. The app did not prompt to install the bundled profiles on relaunch of a *linked* plugin (D3 step 1 needs a packaged install). Each device was left on the hand-authored copy of its profile, not the bundled one. |
 
 Spike-1's detailed outcome goes in `docs/SPIKE1.md` (tick the column here); icon results are the section above.

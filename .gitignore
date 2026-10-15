@@ -3,3 +3,4 @@ com.johnmschoonover.decksync.sdPlugin/bin/
 com.johnmschoonover.decksync.sdPlugin/logs/
 *.js.map
 coverage/
+*.streamDeckPlugin

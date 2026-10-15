@@ -76,7 +76,7 @@ Build, typecheck, validate and tests are green; every [agent] item in Epics A–
 1. **Mini, XL and Neo profiles not exported (D1, [gate]).** Only `profiles/original` and `profiles/plus` exist; the other three need a device of that type to export from (`docs/PROFILES.md`).
 2. **Hardware verification pending** for plugin load, configuration persistence, real sync, startup guard, parent precedence, profile install and Spike-1 — `docs/MANUAL_TESTS.md`, `docs/SPIKE1.md`.
 3. **Decisions to ratify**: every bullet in PRD §8.6 — overrides, `pageCount`, no settle window, stale-switch handling, no SD+ profile, per-device precedence, echo-tag expiry, later-switch-wins, the conflicting-anchor and driven-send (`overturned-switches`) breakers, carrier promotion, pre-start replay, the coalesced-burst cost (manual check C-16), switches kept as tags (cap, superseded, detached, left-page — PRD §8.6 "never forgotten"), anchor edits counting as position (not navigation), and profiles auto-switching on install (`DontAutoSwitchWhenInstalled` left false).
-4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The manifest has `Nodejs.Debug` enabled for development (raises log verbosity); remove it for release (E5).
+4. **Icons are placeholders** (`npm run icons` regenerates them); final art is Epic E4. Final UUID/author domain is OQ-6. The committed manifest has no `Nodejs.Debug` (release logging); add `"Debug": "enabled"` under `Nodejs` locally when you need debug lines or `--inspect`, and don't commit it.
 
 ## Conventions
 

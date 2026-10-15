@@ -34,12 +34,11 @@ the Stream Deck app; no scripts or daemons.
 ## Requirements
 
 - Stream Deck app **7.1+** on macOS 13+ or Windows 10+ (Node.js 24 runtime is bundled with the app).
-- Two or more Stream Deck devices. **No profiles are bundled yet** — they must be exported
-  from the Stream Deck app and added per [`docs/PROFILES.md`](docs/PROFILES.md) before sync
-  can run. Defaults are wired for the Original/MK.2, Mini, XL and Neo; any other device type
-  (including the Stream Deck +) needs a profile name set in the configuration UI.
-- Internet access when the Property Inspector opens: it loads Elgato's `sdpi.css`
-  stylesheet from `cdn.elgato.com` each time. Offline it still works, unstyled.
+- Two or more Stream Deck devices. Profiles are bundled for the **Stream Deck (Original/MK.2)**
+  and the **Stream Deck +**; a Mini, XL or Neo has a default profile name but no bundled file
+  yet (it needs a device of that type to export from, [`docs/PROFILES.md`](docs/PROFILES.md)),
+  and any other device type needs a profile name set in the configuration UI.
+- No internet access is needed; the Property Inspector's stylesheet ships with the plugin.
 
 ## Install (development build)
 
@@ -120,10 +119,10 @@ A **Deck Sync** category with the **Page Anchor** action appears in the actions 
 
 Logs are written inside the installed plugin folder, `…/com.johnmschoonover.decksync.sdPlugin/logs/`
 (the repo's own `.sdPlugin` folder when linked; gitignored) as `com.johnmschoonover.decksync.<n>.log`; the SDK rotates them (up to 10 files of 50 MB), and
-the lowest number is the current file. In the development build (`Nodejs.Debug` on) the same
-lines also go to the plugin's stdout. Engine lines carry the `sync` scope; settings and Property Inspector lines
+the lowest number is the current file. Engine lines carry the `sync` scope; settings and Property Inspector lines
 the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
-`Nodejs.Debug` enabled (the development build does); a release build logs info and above.
+`"Nodejs": { "Debug": "enabled" }` (add it locally while developing: the plugin then also runs
+with `--inspect` and mirrors the log to stdout); the committed manifest logs info and above.
 
 | Line | Meaning |
 |---|---|
@@ -184,14 +183,12 @@ the `DeckSync` scope. Lines marked *(debug)* appear only while the manifest has
   with nothing outstanding from a page the deck was not switched to for the second (a landing
   alone does not lift it; waiting 30 s and flipping twice always does — once, if the deck was
   not switched to the page it is on).
-- **The Property Inspector is unstyled** — it could not load `sdpi.css` from
-  `cdn.elgato.com`; everything still works.
 
 ## Limitations
 
 - Top-level pages only; folders/subpages are detected but not driven (Spike-1 pending).
-- Bundled profiles only. None are bundled yet (D1 pending), and the Stream Deck + has no
-  default profile name (set *Profile* manually).
+- Bundled profiles only: Original/MK.2 and Stream Deck + today; Mini, XL and Neo once a
+  device is available to export from.
 - Button state is not synced, only the page.
 - Page Anchors inside Multi Actions are ignored (the action is not offered there).
 - The Page Anchor is a key action (`Controllers: ["Keypad"]`): it cannot sit on a Stream Deck +
@@ -217,9 +214,10 @@ npm run validate    # streamdeck validate
 npm run icons       # regenerate placeholder icons
 ```
 
-Before a release (PRD Epic E5): remove `Nodejs.Debug` from `manifest.json` (it runs the
-plugin with `--inspect` and raises log verbosity), replace the placeholder icons, and settle
-the final UUID/author domain (PRD OQ-6).
+To package a release: `npx streamdeck pack com.johnmschoonover.decksync.sdPlugin` writes
+`com.johnmschoonover.decksync.streamDeckPlugin` (gitignored; double-click it to install). Still
+open before a Marketplace submission (PRD Epic E): replace the placeholder icons and settle
+the final UUID/author domain (PRD OQ-6). Keep `Nodejs.Debug` out of the committed manifest.
 
 | Path | What |
 |---|---|

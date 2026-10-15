@@ -314,3 +314,17 @@ without a device object, which the SDK can emit); `Startup failed: …` (error).
 10. Folder anchors (Spike-1): until then, anchors inside folders should be disabled or left without a page index.
 11. Whether the app still applies a `switchToProfile` issued just before a device disconnected once it reconnects (manual check C-7 flips P while C is unplugged). The engine forgets a disconnected device's switches (`DEVICE disconnected … droppedPending=n`), so such a late landing would be a SEND — harmless while the rest of the scope is already there, and worth keeping as tags if the app does replay them.
 12. Whether merely opening a Page Anchor's Property Inspector reaches the plugin as `didReceiveSettings` (the panel asks for its settings on open; the SDK forwards every such event to `onAnchorUpdated`). If it does, every PI open logs `ANCHOR updated … page=N→N (no sync)` and counts as an anchor edit (arming the device, resetting its overturn run and its visit record — the conflict run is kept); manual check Gate B records it, and "edited" becomes "opened or edited" in the README and PRD.
+
+### Observed on hardware (2026-10-14, Stream Deck + and Stream Deck MK.2, app 7.4.2, macOS)
+
+Full run in `docs/MANUAL_TESTS.md` (Results). Answers so far: item 1 — the app applies every
+switch, each lands as a RECEIVE in ~2 ms (C-11); item 2d — `willDisappear` precedes the new
+page's appear on every flip; item 6 — after sleep/wake the decks reconnect without an appear
+(`disarmed until its first appear`) and nothing moves until a human flip, which is `STARTUP`;
+item 12 — opening a PI does **not** reach the plugin as a settings event; item 2e — reachable
+only in sequence (`detachedPending=0`), the in-flight window is far too short for a save to
+land inside it. New: the app prompts to install a linked plugin's bundled profiles on the first
+`switchToProfile` per device, not at link time, and the install auto-switches that device to
+page 0 while the engine's pending switch expires — one `OVERTURN` on the first flip after an
+install, then normal. A pasted second anchor sends at once (`CONFLICT … also=[…]`); the next
+visit to that page is a duplicate for both indices rather than two sends.

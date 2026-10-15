@@ -321,7 +321,7 @@ Full run in `docs/MANUAL_TESTS.md` (Results). Answers so far: item 1 — the app
 switch, each lands as a RECEIVE in ~2 ms (C-11); item 2d — `willDisappear` precedes the new
 page's appear on every flip; item 6 — after sleep/wake the decks reconnect without an appear
 (`disarmed until its first appear`) and nothing moves until a human flip, which is `STARTUP`;
-item 12 — opening a PI does **not** reach the plugin as a settings event; item 2e — reachable
+item 2 — a switch to the page a device already shows **re-emits** that page's anchor (disappear then appear), absorbed as `GC … left-page` + `IGNORED … duplicate (consumed)`; item 11 — switches issued while a device was unplugged are **not** applied on replug, and the device returns to the page it left (C-7); item 12 — opening a PI does **not** reach the plugin as a settings event; item 2e — reachable
 only in sequence (`detachedPending=0`), the in-flight window is far too short for a save to
 land inside it. New: the app prompts to install a linked plugin's bundled profiles on the first
 `switchToProfile` per device, not at link time, and the install auto-switches that device to

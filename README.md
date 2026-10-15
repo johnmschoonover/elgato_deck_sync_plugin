@@ -236,6 +236,11 @@ the final UUID/author domain (PRD OQ-6).
 CI runs typecheck, build, validate and tests on Node 22 and 24. See `CLAUDE.md` for how
 work in this repo is organised.
 
+## Support
+
+Deck Sync is free and open source. If it saves you some page-flipping, you can
+[buy me a coffee](https://buymeacoffee.com/johnmschoonover).
+
 ## License
 
 [MIT](LICENSE)
